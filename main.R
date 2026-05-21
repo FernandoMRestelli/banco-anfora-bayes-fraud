@@ -30,7 +30,7 @@ source("src/visualizacion.R")
 # ==============================================================================
 cat("Procesando Fase 1 (T0 Validación)...\n")
 # Carga de datos
-json_data <- cargar_datos_t0("data/metricas_T0_validacion.json")
+json_data <- cargar_datos_t0("data/raw/metricas_T0_validacion.json")
 modelos_lista <- c("M1_logistica", "M2_random_forest", "M3_gbm_completo", "M4_gbm_moderado", "M5_naive_bayes")
 
 # Simulación (Extrae los datos crudos para el gráfico)
@@ -46,7 +46,7 @@ tabla_resumen_t0 <- dt_f1_crudo_t0[, .(
 ), by = .(Modelo)]
 
 # Guardar Tabla Procesada
-guardar_tabla_procesada(tabla_resumen_t0, "data/processed/01_resumen_t0_validacion.csv")
+guardar_tabla_procesada(tabla_resumen_t0, "reports/tables/01_resumen_t0_validacion.csv")
 
 # Visualización y guardado de gráfico
 grafico_t0 <- graficar_posterior_t0(dt_f1_crudo_t0)
@@ -57,7 +57,7 @@ ggsave(filename = "reports/figures/01_densidades_t0.png", plot = grafico_t0, wid
 # ==============================================================================
 cat("Procesando Fase 2 (Trayectorias Temporales)...\n")
 # Carga y preparación
-df_temporales <- fread("data/metricas_temporales.csv")
+df_temporales <- fread("data/raw/metricas_temporales.csv")
 df_1_18 <- df_temporales[mes >= 1 & mes <= 18]
 dt_listo  <- preparar_conteos_temporales(df_1_18)
 
@@ -70,7 +70,7 @@ dt_trayectorias <- dt_listo[, {
 }, by = .(modelo, mes)]
 
 # Guardar Tabla Procesada de Trayectorias
-guardar_tabla_procesada(dt_trayectorias, "data/processed/02_trayectorias_mes_a_mes.csv")
+guardar_tabla_procesada(dt_trayectorias, "reports/tables/02_trayectorias_mes_a_mes.csv")
 
 # Visualización y guardado de gráfico
 grafico_crisis <- graficar_trayectorias_temporales(dt_trayectorias)
