@@ -1,0 +1,322 @@
+
+```{r setup, include=FALSE}
+# Cargás conflicted primero que todo
+library(conflicted)
+
+library(jsonlite)
+library(tidyverse)
+library(readr)
+library(data.table)
+library(MASS)
+library(rethinking)
+library(brms)
+library(bayesplot)
+library(scales)
+library(ibUBA)
+
+conflict_prefer("select", "dplyr")    # Prioriza dplyr::select sobre MASS::select
+conflict_prefer("filter", "dplyr")    # Prioriza dplyr::filter sobre stats::filter
+conflict_prefer("map", "purrr")       # Prioriza purrr::map sobre rethinking::map
+conflict_prefer("transpose", "data.table")
+```
+
+
+```{r}
+# Leo el archivo CSV 
+df_metricas <- read_csv("/home/ezequiel/banco-anfora-bayes-fraud/data/metricas_temporales.csv") 
+
+# Muestra las primeras 6 filas
+head(df_metricas)  
+```
+
+
+```{r RECONSTRUIR LOS CONTEOS PARA M3 EN T0 (MESES 1 A 12)}
+# df_metricas ya está cargado
+datos_M3_T0 <- df_metricas %>%
+  filter(modelo == "M3_gbm_completo", mes <= 12) %>%
+  mutate(
+    # Reconstruimos TP, FN y FP mes a mes
+    TP = round(recall * n_fraude),
+    FN = n_fraude - TP,
+    FP = round(TP * (1 - precision) / precision)
+  )
+
+# Sumamos toda la evidencia de los 12 meses
+evidencia_T0 <- datos_M3_T0 %>%
+  summarise(
+    suma_TP = sum(TP),
+    suma_FP = sum(FP),
+    suma_FN = sum(FN)
+  )
+
+TP_tot <- evidencia_T0$suma_TP
+FP_tot <- evidencia_T0$suma_FP
+FN_tot <- evidencia_T0$suma_FN
+```
+
+```{r SIMULACIÓN MONTE CARLO DIRECTA (Reemplaza a brms)}
+# Prior: Beta(1,1)
+# Posterior Precision ~ Beta(1 + TP, 1 + FP)
+# Posterior Sensibilidad ~ Beta(1 + TP, 1 + FN)
+
+S <- 5000              # Tamaño de muestra pedido
+set.seed(20260424)     # Semilla oficial del caso
+
+# Extraemos 5000 muestras aleatorias de la posterior exacta
+muestras_precision <- rbeta(S, shape1 = 1 + TP_tot, shape2 = 1 + FP_tot)
+muestras_recall    <- rbeta(S, shape1 = 1 + TP_tot, shape2 = 1 + FN_tot)
+
+# Propagamos la incertidumbre hacia F1
+muestras_f1 <- (2 * muestras_precision * muestras_recall) / (muestras_precision + muestras_recall)
+
+```
+
+```{r FORMATEAR COMO data.tables)}
+
+dt_prec <- data.table(
+  parametro = "Precision", 
+  modelo = "M3_T0", 
+  valor = muestras_precision
+)
+
+dt_rec <- data.table(
+  parametro = "Sensibilidad", 
+  modelo = "M3_T0", 
+  valor = muestras_recall
+)
+
+dt_f1 <- data.table(
+  parametro = "F1_Score", 
+  modelo = "M3_T0", 
+  valor = muestras_f1
+)
+
+dt_posteriors <- rbindlist(list(dt_prec, dt_rec, dt_f1))
+```
+
+
+```{r RESUMEN CON HPDI (Usando los cuantiles de tu código)}
+
+resumen <- dt_posteriors[, .(
+  media = round(mean(valor), 3),
+  mediana = round(median(valor), 3),
+  # HPDI 95% 
+  q025 = round(quantile(valor, 0.025), 3),
+  q975 = round(quantile(valor, 0.975), 3)
+), by = .(parametro, modelo)]
+
+cat("=== Comparación de posteriors para M3 en T0 ===\n")
+print(resumen[order(parametro)])
+```
+
+```{r GRÁFICO (Adaptado de tu ggplot)}
+
+ggplot(dt_posteriors, aes(x = valor, fill = modelo, color = modelo)) +
+  geom_density(alpha = 0.35, linewidth = 1.1) +
+  # Usamos scales = "free" para que F1, Precisión y Recall respiren bien
+  facet_wrap(~ parametro, scales = "free", ncol = 3) +
+  scale_fill_manual(values  = c("M3_T0" = "#1b9e77")) +
+  scale_color_manual(values = c("M3_T0" = "#1b9e77")) +
+  labs(title    = "Distribuciones posteriores: M3 en T0 (Meses 1 a 12)",
+       subtitle = "Muestras de Monte Carlo a partir de conjugadas Beta-Binomial",
+       x = "Valor de la métrica", 
+       y = "Densidad posterior") +
+  theme_minimal(base_size = 13)
+
+```
+
+Pero el F1_Score quedó en el intervalo [0.867, 0.880], con una mediana de 0.874. El 0.842 se quedó afuera del intervalo para el parámetro. 
+Debo usar las métricas del archivo JSON
+
+
+```{r JSON}
+library(jsonlite)
+library(data.table)
+library(tidyverse)
+
+# Leer el archivo JSON
+json_data <- fromJSON("/home/ezequiel/banco-anfora-bayes-fraud/data/metricas_T0_validacion.json")
+
+# Extraer los conteos con la ruta correcta
+TP_tot <- json_data$M3_gbm_completo$T0_validacion$TP
+FP_tot <- json_data$M3_gbm_completo$T0_validacion$FP
+FN_tot <- json_data$M3_gbm_completo$T0_validacion$FN
+
+S <- 5000              
+set.seed(20260424)     
+
+muestras_precision <- rbeta(S, shape1 = 1 + TP_tot, shape2 = 1 + FP_tot)
+muestras_recall    <- rbeta(S, shape1 = 1 + TP_tot, shape2 = 1 + FN_tot)
+muestras_f1 <- (2 * muestras_precision * muestras_recall) / (muestras_precision + muestras_recall)
+
+dt_prec <- data.table(parametro = "Precision", modelo = "M3_T0", valor = muestras_precision)
+dt_rec  <- data.table(parametro = "Sensibilidad", modelo = "M3_T0", valor = muestras_recall)
+dt_f1   <- data.table(parametro = "F1_Score", modelo = "M3_T0", valor = muestras_f1)
+
+dt_posteriors <- rbindlist(list(dt_prec, dt_rec, dt_f1))
+
+resumen <- dt_posteriors[, .(
+  media   = round(mean(valor), 3),
+  mediana = round(median(valor), 3),
+  q025    = round(quantile(valor, 0.025), 3),
+  q975    = round(quantile(valor, 0.975), 3)
+), by = .(parametro, modelo)]
+
+cat("=== Comparación de posteriors para M3 en T0 ===\n")
+print(resumen[order(parametro)])
+
+```
+
+```{r GRÁFICO (Adaptado de tu ggplot)}
+
+ggplot(dt_posteriors, aes(x = valor, fill = modelo, color = modelo)) +
+  geom_density(alpha = 0.35, linewidth = 1.1) +
+  # Usamos scales = "free" para que F1, Precisión y Recall respiren bien
+  facet_wrap(~ parametro, scales = "free", ncol = 3) +
+  scale_fill_manual(values  = c("M3_T0" = "#1b9e77")) +
+  scale_color_manual(values = c("M3_T0" = "#1b9e77")) +
+  labs(title    = "Distribuciones posteriores: M3 en T0 (Meses 1 a 12)",
+       subtitle = "Muestras de Monte Carlo a partir de conjugadas Beta-Binomial",
+       x = "Valor de la métrica", 
+       y = "Densidad posterior") +
+  theme_minimal(base_size = 13)
+
+```
+
+
+```{r REPLICAR T0 VALIDACIÓN PARA LOS 5 MODELOS}
+library(jsonlite)
+library(data.table)
+library(tidyverse)
+
+# 1. Cargar el JSON y definir modelos
+json_data <- fromJSON("/home/ezequiel/banco-anfora-bayes-fraud/data/metricas_T0_validacion.json")
+modelos_lista <- c("M1_logistica", "M2_random_forest", "M3_gbm_completo", "M4_gbm_moderado", "M5_naive_bayes")
+
+# Genera las muestras de Monte Carlo (Datos Crudos)
+simular_posterior_f1 <- function(nombre_modelo, datos_json, S = 5000) {
+  TP <- datos_json[[nombre_modelo]]$T0_validacion$TP
+  FP <- datos_json[[nombre_modelo]]$T0_validacion$FP
+  FN <- datos_json[[nombre_modelo]]$T0_validacion$FN
+  
+  # Monte Carlo de las conjugadas Beta-Binomial
+  muestras_precision <- rbeta(S, shape1 = 1 + TP, shape2 = 1 + FP)
+  muestras_recall    <- rbeta(S, shape1 = 1 + TP, shape2 = 1 + FN)
+  muestras_f1        <- (2 * muestras_precision * muestras_recall) / (muestras_precision + muestras_recall)
+  
+  # Devuelve los datos crudos y los conteos
+  data.table(
+    Modelo  = nombre_modelo,
+    Conteos = paste0("TP:", TP, " | FP:", FP, " | FN:", FN),
+    F1_Muestra = muestras_f1
+  )
+}
+
+# Ejecutamos la simulación 
+set.seed(20260424)
+dt_f1_crudo <- rbindlist(lapply(modelos_lista, simular_posterior_f1, datos_json = json_data))
+
+# GENERAR LA TABLA RESUMEN (A partir de los datos crudos)
+tabla_resumen_t0 <- dt_f1_crudo[, .(
+  Conteos    = first(Conteos), 
+  Mediana_F1 = round(median(F1_Muestra), 3),
+  HPDI_95    = paste0("[", round(quantile(F1_Muestra, 0.025), 3), ", ", 
+                          round(quantile(F1_Muestra, 0.975), 3), "]")
+), by = Modelo]
+
+cat("=== PANEL 1: Tabla Resumen de T0 Validación ===\n")
+print(tabla_resumen_t0)
+
+# 4. GENERAR EL GRÁFICO (A partir de los mismos datos crudos)
+# Agregamos la columna para destacar a M3 sobre la marcha
+dt_f1_crudo[, Destacado := ifelse(Modelo == "M3_gbm_completo", "M3 (Elegido)", "Otros Modelos")]
+colores_paleta <- c("M3 (Elegido)" = "#0072B2", "Otros Modelos" = "#999999")
+
+ggplot(dt_f1_crudo, aes(x = F1_Muestra, group = Modelo, fill = Destacado, color = Destacado)) +
+  geom_density(alpha = 0.4, linewidth = 0.8) +
+  scale_fill_manual(values = colores_paleta) +
+  scale_color_manual(values = colores_paleta) +
+  coord_cartesian(xlim = c(0, 1)) + 
+  labs(
+    title = "Comparación de Distribuciones Posteriores del F1-Score",
+    subtitle = "Validación Histórica T0: M3 demuestra una dominancia absoluta",
+    x = "Valor del F1-Score (Muestras de la Posterior)",
+    y = "Densidad Posterior", fill = "Condición", color = "Condición"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+```
+
+```{r MÉTRICAS TEMPORALES PARA LOS 5 MODELOS}
+library(data.table)
+library(ggplot2)
+
+# Cargo el CSV temporal
+df_temporales <- fread("/home/ezequiel/banco-anfora-bayes-fraud/data/metricas_temporales.csv")
+
+# Filtro para los meses 1 a 18 
+df_1_18 <- df_temporales[mes >= 1 & mes <= 18]
+
+# FUNCIÓN DE MONTE CARLO PARA CADA FILA (MES / MODELO)
+
+calcular_posterior_fila <- function(tp, fp, fn, S = 5000) {
+  # Si por alguna razón hay valores faltantes, devolvemos NAs
+  if(is.na(tp) | is.na(fp) | is.na(fn)) return(list(mediana = NA, q025 = NA, q975 = NA))
+  
+  muestras_precision <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fp)
+  muestras_recall    <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fn)
+  muestras_f1        <- (2 * muestras_precision * muestras_recall) / (muestras_precision + muestras_recall)
+  
+  list(
+    Mediana_F1 = median(muestras_f1),
+    q025       = quantile(muestras_f1, 0.025),
+    q975       = quantile(muestras_f1, 0.975)
+  )
+}
+
+# APLICAR SIMULACIÓN A TODO EL DATASET CON DATA.TABLE
+set.seed(20260424)
+
+# Calculamos TP, FN y FP redondeando al número entero más cercano
+df_1_18[, tp := round(recall * n_fraude)]
+df_1_18[, fn := n_fraude - tp]
+# Evitamos división por cero por las dudas
+df_1_18[, fp := ifelse(precision > 0, round((tp / precision) - tp), 0)]
+
+# Ejecuto la simulación fila por fila
+dt_trayectorias <- df_1_18[, {
+  res <- calcular_posterior_fila(tp, fp, fn)
+  .(Mediana_F1 = res$Mediana_F1, q025 = res$q025, q975 = res$q975)
+}, by = .(modelo, mes)]
+
+# GRAFICAR LAS TRAYECTORIAS Y LAS BANDAS DE INCERTIDUMBRE
+ggplot(dt_trayectorias, aes(x = mes, y = Mediana_F1, color = modelo, fill = modelo)) +
+  # Líneas de trayectoria para cada modelo
+  geom_line(linewidth = 1) +
+  # Bandas de incertidumbre HPDI del 95%
+  geom_ribbon(aes(ymin = q025, ymax = q975), alpha = 0.15, color = NA) +
+  
+  # Líneas verticales de meses 12, 13 y 16
+  geom_vline(xintercept = 12, linetype = "dashed", color = "darkgreen", linewidth = 0.7) +
+  geom_vline(xintercept = 13, linetype = "dashed", color = "firebrick", linewidth = 0.7) +
+  geom_vline(xintercept = 16, linetype = "dashed", color = "purple", linewidth = 0.7) +
+  
+  # Anotaciones de texto 
+  annotate("text", x = 11.5, y = 0.7, label = "Fin de T0", angle = 90, color = "darkgreen", size = 3) +
+  annotate("text", x = 13.5, y = 0.7, label = "Inicio Phishing", angle = 90, color = "firebrick", size = 3) +
+  annotate("text", x = 16.5, y = 0.7, label = "Estabilización", angle = 90, color = "purple", size = 3) +
+  
+  labs(
+    title = "Evolución Mensual del F1-Score con Incertidumbre Bayesiana",
+    subtitle = "Meses 1 a 18: Evidencia del colapso de M3 ante la campaña de phishing",
+    x = "Mes de Operación en Producción",
+    y = "F1-Score (Mediana e Intervalo HPDI 95%)",
+    color = "Modelo", fill = "Modelo"
+  ) +
+  scale_x_continuous(breaks = 1:18) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+Al verlo temporalmente, mes a mes, es que puedo visualizar cuando se cruzan las F1 del modelo M3 con los demás. Si promediara entre 13 y 18, vería un solo valor de F1 por modelo (con su intervalo), y tal vez sería siendo M3 mejor que los otros. El intervalo para el promedio de 13-18 de M3 sería muy amplio (mucha dispersión). Hay un quiebre entre los meses 15-16. 
+Al cambiar la estrategia de los estafadores, el modelo M3 se volvió obsoleto. 
