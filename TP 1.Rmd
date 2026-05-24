@@ -1,0 +1,281 @@
+---
+title: "TP Inferencia bayesiana"
+output: html_notebook
+---
+
+Import libs
+```{r}
+library(tidyverse)
+library(data.table)
+library(rethinking)
+library(scales)
+library(arrow)
+library(ggplot2)
+
+# Paquete del curso
+library(ibUBA)
+```
+
+Load dataset
+```{r}
+df_validation <- read.csv("operaciones_T0_valid_m3_predictions.csv")
+
+df_validation
+```
+Calculate posterior
+```{r}
+# confusion matrix counts
+
+TP <- df_validation %>%
+  filter(es_fraude == "True",
+         m3_predictions == "True") %>%
+  nrow()
+
+FP <- df_validation %>%
+  filter(es_fraude == "False",
+         m3_predictions == "True") %>%
+  nrow()
+
+FN <- df_validation %>%
+  filter(es_fraude == "True",
+         m3_predictions == "False") %>%
+  nrow()
+
+# -----------------------------
+# Posterior precision
+
+alpha_precision <- 1 + TP
+beta_precision  <- 1 + FP
+
+alpha_recall <- 1 + TP
+beta_recall  <- 1 + FN
+```
+
+Distribution and HDPI
+Precision
+
+```{r}
+# grid
+x <- seq(0, 1, length.out = 10000)
+
+# density
+y <- dbeta(x, alpha_precision, beta_precision)
+
+# plot
+plot(
+  x,
+  y,
+  type = "l",
+  lwd = 3,
+  xlab = "p",
+  ylab = "Density",
+  main = paste0(
+    "Posterior Beta(",
+    alpha_precision, ", ",
+    beta_precision, ") - PRECISION"
+  )
+)
+
+# median
+median_p <- qbeta(0.5, alpha_precision, beta_precision)
+
+abline(v = median_p, lty = 2)
+
+# HPDI
+samples_precision <- rbeta(
+  10000,
+  shape1 = alpha_precision,
+  shape2 = beta_precision
+)
+hpdi_p = hpdi(samples_precision, prob = 0.95)
+cat('Distribution median', median_p, 'Distribution HPDI lower', hpdi_p['lower'], 'upper', hpdi_p['upper'])
+```
+Recall
+```{r}
+# grid
+x <- seq(0, 1, length.out = 10000)
+
+# density
+y <- dbeta(x, alpha_recall, beta_recall)
+
+# plot
+plot(
+  x,
+  y,
+  type = "l",
+  lwd = 3,
+  xlab = "p",
+  ylab = "Density",
+  main = paste0(
+    "Posterior Beta(",
+    alpha_recall, ", ",
+    beta_recall, ") - RECALL"
+  )
+)
+
+# median
+median_r <- qbeta(0.5, alpha_recall, beta_recall)
+
+abline(v = median_r, lty = 2)
+
+# HPDI
+samples_recall <- rbeta(
+  10000,
+  shape1 = alpha_recall,
+  shape2 = beta_recall
+)
+hpdi_r = hpdi(samples_recall, prob = 0.95)
+cat('Distribution median', median_r, 'Distribution HPDI lower', hpdi_r['lower'], 'upper', hpdi_r['upper'])
+```
+F1 Monte Carlo
+```{r}
+# F1 puntual ≈ 0,842
+samples_f1 <- 2*samples_recall*samples_precision/(samples_recall + samples_precision)
+hpdi_f1 <- hpdi(samples_f1, prob = 0.95)
+cat('Median', median(samples_f1), 'Distribution HPDI lower', hpdi_f1['lower'], 'upper', hpdi_f1['upper'])
+cat('\n')
+cat('F1 point estimate', 2*TP/(2*TP+FP+FN))
+```
+Paso 4. Replicar el procedimiento sobre los cinco modelos
+
+Load all predictions and cycle through models
+```{r}
+df_validation <- read.csv("operaciones_T0_valid_all_predictions.csv")
+
+preds <- c('M1_predictions',	'M2_predictions',	'M3_predictions',	'M4_predictions',	'M5_predictions')
+
+for (pred in preds) {
+    TP <- df_validation %>%
+      filter(es_fraude == "True",
+             .data[[pred]] == "True") %>%
+      nrow()
+    
+    FP <- df_validation %>%
+      filter(es_fraude == "False",
+             .data[[pred]] == "True") %>%
+      nrow()
+    
+    FN <- df_validation %>%
+      filter(es_fraude == "True",
+             .data[[pred]] == "False") %>%
+      nrow()
+    
+    # Posterior precision
+    
+    alpha_precision <- 1 + TP
+    beta_precision  <- 1 + FP
+    
+    alpha_recall <- 1 + TP
+    beta_recall  <- 1 + FN
+    
+    # grid
+    x <- seq(0, 1, length.out = 10000)
+    
+    # density
+    y <- dbeta(x, alpha_precision, beta_precision)
+    
+    # plot
+    plot(
+      x,
+      y,
+      type = "l",
+      lwd = 3,
+      xlab = "p",
+      ylab = "Density",
+      main = paste0(pred,
+        "Posterior Beta(",
+        alpha_precision, ", ",
+        beta_precision, ") - PRECISION"
+      )
+    )
+    
+    # median
+    median_p <- qbeta(0.5, alpha_precision, beta_precision)
+    
+    abline(v = median_p, lty = 2)
+    
+    # HPDI
+    samples_precision <- rbeta(
+      10000,
+      shape1 = alpha_precision,
+      shape2 = beta_precision
+    )
+    hpdi_p = hpdi(samples_precision, prob = 0.95)
+    cat(pred, 'PRECISION Distribution median', median_p, 'Distribution HPDI lower', hpdi_p['lower'], 'upper', hpdi_p['upper'])
+    cat('\n')
+    
+    # grid
+    x <- seq(0, 1, length.out = 10000)
+    
+    # density
+    y <- dbeta(x, alpha_recall, beta_recall)
+    
+    # plot
+    plot(
+      x,
+      y,
+      type = "l",
+      lwd = 3,
+      xlab = "p",
+      ylab = "Density",
+      main = paste0(pred,
+        "Posterior Beta(",
+        alpha_recall, ", ",
+        beta_recall, ") - RECALL"
+      )
+    )
+    
+    # median
+    median_r <- qbeta(0.5, alpha_recall, beta_recall)
+    
+    abline(v = median_r, lty = 2)
+    
+    # HPDI
+    samples_recall <- rbeta(
+      10000,
+      shape1 = alpha_recall,
+      shape2 = beta_recall
+    )
+    hpdi_r = hpdi(samples_recall, prob = 0.95)
+    cat(pred, 'RECALL Distribution median', median_r, 'Distribution HPDI lower', hpdi_r['lower'], 'upper', hpdi_r['upper'])
+    cat('\n')
+    
+    samples_f1 <- 2*samples_recall*samples_precision/(samples_recall + samples_precision)
+    hpdi_f1 <- hpdi(samples_f1, prob = 0.95)
+    
+
+
+    df <- data.frame(samples_f1 = samples_f1)
+    
+    gg_g <- ggplot(df, aes(x = samples_f1)) +
+      geom_density(linewidth = 1) +
+      geom_vline(xintercept = median(samples_f1), linetype = "dashed") +
+      xlim(0, 1) +
+      labs(
+        title = paste0(pred, "Density of F1 distribution"),
+        x = "F1 score",
+        y = "Density"
+      )
+    print(gg_g)
+    
+    cat(pred, 'F1 score Median', median(samples_f1), 'Distribution HPDI lower', hpdi_f1['lower'], 'upper', hpdi_f1['upper'])
+    cat('\n')
+    cat('F1 point estimate', 2*TP/(2*TP+FP+FN))
+    cat('\n')
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
