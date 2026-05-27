@@ -1,6 +1,0 @@
-Modelo,Conteos,Mediana_F1,HPDI_95
-M1_logistica,TP:347 | FP:1065 | FN:1101,0.243,"[0.227, 0.259]"
-M2_random_forest,TP:377 | FP:1272 | FN:1071,0.244,"[0.229, 0.259]"
-M3_gbm_completo,TP:1176 | FP:170 | FN:272,0.841,"[0.827, 0.855]"
-M4_gbm_moderado,TP:395 | FP:1507 | FN:1053,0.236,"[0.222, 0.251]"
-M5_naive_bayes,TP:330 | FP:1312 | FN:1118,0.213,"[0.199, 0.228]"
