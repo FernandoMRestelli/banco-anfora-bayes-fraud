@@ -79,3 +79,29 @@ graficar_trayectorias_temporales <- function(dt_trayectorias) {
   
   return(g)
 }
+
+#' Gráfico de densidades solapadas para la ventana operativa
+#'
+#' @param dt_muestras_wide data.table. Muestras en formato ancho.
+#' @return Un objeto ggplot con las 5 densidades en el mismo eje numérico.
+graficar_solapamiento_ventana <- function(dt_muestras_wide) {
+  # Pasamos a formato largo (long) solo para facilitarle la vida a ggplot
+  dt_long <- melt(dt_muestras_wide, measure.vars = colnames(dt_muestras_wide),
+                  variable.name = "Modelo", value.name = "F1_Muestra")
+  
+  g <- ggplot(dt_long, aes(x = F1_Muestra, fill = Modelo, color = Modelo)) +
+    geom_density(alpha = 0.25, linewidth = 0.9) +
+    scale_fill_brewer(palette = "Set1") +
+    scale_color_brewer(palette = "Set1") +
+    coord_cartesian(xlim = c(0, 1)) +
+    labs(
+      title = "Solapamiento de Densidades Posteriores del F1-Score",
+      subtitle = "Ventana Operativa Crítica: Meses 16 a 18 (Post-Crisis de Phishing)",
+      x = "Valor del F1-Score",
+      y = "Densidad Posterior"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom")
+  
+  return(g)
+}

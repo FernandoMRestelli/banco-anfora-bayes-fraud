@@ -64,3 +64,67 @@ calcular_posterior_fila <- function(tp, fp, fn, S = 5000) {
     q975       = quantile(muestras_f1, 0.975)
   )
 }
+
+#' Simula la posterior del F1-Score agregada para una ventana temporal
+#'
+#' @description 
+#' Toma un data.table temporal, filtra una ventana de meses específica, 
+#' agrega (suma) los conteos absolutos de TP, FP y FN por modelo, y realiza 
+#' la simulación Monte Carlo Beta-Binomial.
+#'
+#' @param dt_listo data.table. Contiene las columnas modelo, mes, tp, fp, fn.
+#' @param meses_ventana Vector numérico. Meses que componen la ventana (ej: 16:18).
+#' @param S Número entero. Cantidad de simulaciones (default: 5000).
+#' @return Un data.table en formato ancho (wide), donde cada columna es un modelo 
+#'         y cada fila es una muestra de Monte Carlo.
+simular_posterior_ventana <- function(dt_listo, meses_ventana, S = 5000) {
+  
+  # 1. Filtrar y agregar los conteos absolutos sobre los tres meses
+  dt_agregado <- dt_listo[mes %in% meses_ventana, .(
+    tp_tot = sum(tp),
+    fp_tot = sum(fp),
+    fn_tot = sum(fn)
+  ), by = .(modelo)]
+  
+  # 2. Simular muestras para cada modelo y guardarlas en una lista
+  lista_muestras <- list()
+  
+  for (mod in dt_agregado$modelo) {
+    conteos <- dt_agregado[modelo == mod]
+    
+    muestras_precision <- rbeta(S, shape1 = 1 + conteos$tp_tot, shape2 = 1 + conteos$fp_tot)
+    muestras_recall    <- rbeta(S, shape1 = 1 + conteos$tp_tot, shape2 = 1 + conteos$fn_tot)
+    muestras_f1        <- (2 * muestras_precision * muestras_recall) / (muestras_precision + muestras_recall)
+    
+    lista_muestras[[mod]] <- muestras_f1
+  }
+  
+  # Convertir a un data.table ancho (5 columnas, S filas)
+  return(as.data.table(lista_muestras))
+}
+
+#' Calcula la matriz de dominancia bayesiana P(F1(i) > F1(j))
+#'
+#' @description 
+#' Compara par a par las columnas de muestras de un data.table, evaluando la 
+#' fracción de simulaciones donde el modelo de la fila supera al de la columna.
+#'
+#' @param dt_muestras_wide data.table. Formato ancho generado por simular_posterior_ventana.
+#' @return Una matriz de 5x5 con los nombres de los modelos y las probabilidades de dominancia.
+calcular_matriz_dominancia <- function(dt_muestras_wide) {
+  nombres_modelos <- colnames(dt_muestras_wide)
+  n_modelos <- length(nombres_modelos)
+  
+  # Inicializar matriz vacía
+  matriz_dom <- matrix(NA_real_, nrow = n_modelos, ncol = n_modelos, 
+                       dimnames = list(nombres_modelos, nombres_modelos))
+  
+  # Llenar la matriz celda por celda aplicando tu lógica conceptual (mean(i > j))
+  for (i in nombres_modelos) {
+    for (j in nombres_modelos) {
+      matriz_dom[i, j] <- mean(dt_muestras_wide[[i]] > dt_muestras_wide[[j]])
+    }
+  }
+  
+  return(matriz_dom)
+}

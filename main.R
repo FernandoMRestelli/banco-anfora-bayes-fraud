@@ -76,10 +76,50 @@ guardar_tabla_procesada(dt_trayectorias, "reports/tables/02_trayectorias_mes_a_m
 grafico_crisis <- graficar_trayectorias_temporales(dt_trayectorias)
 ggsave(filename = "reports/figures/02_trayectorias_crisis.png", plot = grafico_crisis, width = 12, height = 7, dpi = 300)
 
+
+
+# ==============================================================================
+# FASE 3: POSTERIORES Y MATRIZ DE DOMINANCIA EN VENTANA OPERATIVA (Paso 6)
+# ==============================================================================
+cat("\nProcesando Fase 3 (Paso 6: Ventana Operativa Meses 16 a 18)...\n")
+
+# 1. Simulación agregada en formato ancho (usa df_1_18 y dt_listo calculados en Fase 2)
+set.seed(20260424)
+dt_muestras_ventana <- simular_posterior_ventana(dt_listo, meses_ventana = 16:18, S = 5000)
+
+# 2. Reportar Mediana y HPDI de esta ventana agregada (Punto 1 del enunciado)
+dt_long_ventana <- melt(dt_muestras_ventana, measure.vars = colnames(dt_muestras_ventana),
+                        variable.name = "Modelo", value.name = "F1_Muestra")
+
+tabla_resumen_ventana <- dt_long_ventana[, .(
+  Mediana_F1 = round(median(F1_Muestra), 3),
+  HPDI_95    = paste0("[", round(quantile(F1_Muestra, 0.025), 3), ", ", 
+                          round(quantile(F1_Muestra, 0.975), 3), "]")
+), by = Modelo]
+
+cat("\n=== PUNTO 1: Resumen Posterior Ventana Operativa (Meses 16-18) ===\n")
+print(tabla_resumen_ventana)
+guardar_tabla_procesada(tabla_resumen_ventana, "reports/tables/03_resumen_ventana_operativa.csv")
+
+# 3. Generar y guardar el gráfico de solapamiento (Punto 2 del enunciado)
+grafico_solapamiento <- graficar_solapamiento_ventana(dt_muestras_ventana) +
+  scale_x_continuous(limits = c(0, 0.5), breaks = seq(0, 0.5, by = 0.1))
+ggsave(filename = "reports/figures/03_solapamiento_ventana.png", plot = grafico_solapamiento, 
+       width = 11, height = 6, dpi = 300)
+
+# 4. Calcular y reportar la Matriz de Dominancia Bayesiana (Punto 3 del enunciado)
+matriz_dominancia <- calcular_matriz_dominancia(dt_muestras_ventana)
+
+cat("\n=== PUNTO 3: Matriz de Dominancia Bayesian P(F1(fila) > F1(columna)) ===\n")
+print(round(matriz_dominancia, 3))
+
+# Guardar la matriz como un archivo CSV para el portfolio
+write.csv(matriz_dominancia, "reports/tables/04_matriz_dominancia_bayesiana.csv", row.names = TRUE)
+
 cat("========================================================\n")
-cat("Pipeline ejecutado con éxito.\n")
+cat("Pipeline ejecutado con éxito hasta el paso 6.\n")
 cat("-> Gráficos guardados en: reports/figures/\n")
-cat("-> Tablas CSV guardadas en: data/processed/\n")
+cat("-> Tablas CSV guardadas en: reports/tables/\n")
 cat("========================================================\n")
 
 # Volvemos a conectar la salida a la terminal normal y cerramos el archivo log

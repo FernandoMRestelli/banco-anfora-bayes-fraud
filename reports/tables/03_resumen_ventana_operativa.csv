@@ -1,0 +1,6 @@
+Modelo,Mediana_F1,HPDI_95
+M1_logistica,0.271,"[0.241, 0.301]"
+M2_random_forest,0.311,"[0.283, 0.34]"
+M3_gbm_completo,0.104,"[0.076, 0.136]"
+M4_gbm_moderado,0.321,"[0.294, 0.349]"
+M5_naive_bayes,0.227,"[0.2, 0.253]"
