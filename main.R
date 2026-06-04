@@ -19,11 +19,43 @@ sink(log_con, type = "message") # Desvía warnings y mensajes de error
 # Cargar librerías core
 library(data.table)
 library(ggplot2)
+library(patchwork)
+library(arrow)
 
 # Importar los módulos del proyecto
 source("src/data_prep.R")
 source("src/monte_carlo.R")
 source("src/visualizacion.R")
+source("src/visualizaciones_EDA.R")
+
+
+# ==============================================================================
+# EDA: Comparativo de variables entre T0 y T1 y entre clases
+# ==============================================================================
+
+plots_numericas <- graficar_distribuciones_numericas(
+  operaciones_T0 = read_parquet("data/raw/operaciones_T0_train.parquet"),
+  operaciones_T1 = read_parquet("data/raw/operaciones_T1_etiquetadas.parquet")
+)
+
+resultado_categoricas <- graficar_tasa_fraude_categoricas(
+  operaciones_T0 = read_parquet("data/raw/operaciones_T0_train.parquet"),
+  operaciones_T1 = read_parquet("data/raw/operaciones_T1_etiquetadas.parquet")
+)
+
+
+#visualización y guardado de gráficos
+for (nombre_var in names(plots_numericas)) {
+  ggsave(filename = paste0("reports/figures/03_distribuciones_", nombre_var, ".png"), 
+  plot = plots_numericas[[nombre_var]], width = 15, height = 6, dpi = 300)
+} 
+
+
+for (nombre_var in names(resultado_categoricas$plots)) {
+  plot_final <- resultado_categoricas$plots[[nombre_var]]
+  ggsave(filename = paste0("reports/figures/04_tasa_fraude_", nombre_var, ".png"), 
+         plot = plot_final, width = 10, height = 6, dpi = 300)
+}
 
 # ==============================================================================
 # VALIDACIÓN HISTÓRICA (T0)
@@ -46,7 +78,7 @@ tabla_resumen_t0 <- dt_f1_crudo_t0[, .(
 ), by = .(Modelo)]
 
 # Guardar Tabla Procesada
-guardar_tabla_procesada(tabla_resumen_t0, "reports/tables/01_resumen_t0_validacion.csv")
+guardar_tabla_procesada(tabla_resumen_t0, "reports/tables/01_resumen_t0_validacion_b.csv")
 
 # Visualización y guardado de gráfico
 grafico_t0 <- graficar_posterior_t0(dt_f1_crudo_t0)
