@@ -1,0 +1,6 @@
+Modelo_i,M1_logistica,M2_random_forest,M3_gbm_completo,M4_gbm_moderado,M5_naive_bayes
+M1_logistica,0.5,0.0301,1,0.0096,0.9863
+M2_random_forest,0.9699,0.5,1,0.313,1
+M3_gbm_completo,0,0,0.5,0,0
+M4_gbm_moderado,0.9904,0.687,1,0.5,1
+M5_naive_bayes,0.0137,0,1,0,0.5

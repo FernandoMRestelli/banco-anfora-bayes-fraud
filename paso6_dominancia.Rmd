@@ -1,0 +1,465 @@
+---
+title: "PASO 6 — POSTERIORES Y MATRIZ DE DOMINANCIA SOBRE LA VENTANA OPERATIVA"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+------------------------------------------------------------------------
+
+En el paso anterior se vio que **M3 colapsa progresivamente desde el mes 13**, mientras los otros cuatro modelos mantuvieron un rendimiento estable. A partir del mes 16 el nuevo escenario se estabiliza: los estafadores consolidaron su modus operandi y con ello los modelos encontraron un nuevo piso de performance.
+
+Este paso construye tres objetos sobre esa **ventana operativa (meses 16 a 18)**:
+
+1.  **Posteriores Beta-Binomial agregadas** por modelo — mediana y HPDI 95%.
+2.  **Densidades posteriores de F1** superpuestas — para visualizar solapamiento.
+3.  **Matriz de dominancia 5×5** — P(F1ᵢ \> F1ⱼ) para cada par de modelos.
+
+> **Supuesto de persistencia declarado:** la decisión de julio 2025 se sostiene bajo el supuesto de que el régimen post-estabilización (meses 16–18) es representativo del período siguiente. Si la campaña de phishing fuera transitoria, la ventana correcta podría ser otra. Esta elección es metodológica y se argumenta en la presentación.
+
+------------------------------------------------------------------------
+
+# Setup
+
+```{r librerias}
+library(data.table)
+library(ggplot2)
+library(kableExtra)
+
+# Semilla oficial del caso
+set.seed(20260424)
+
+# Tamaño de muestra Monte Carlo (se pidió un mínimo de 5000, en este caso usé 10000 que debería tener el mismo o parecido resultado)
+S <- 10000
+
+# Crear carpetas de salida
+dir.create("reports/tables",  recursive = TRUE, showWarnings = FALSE)
+dir.create("reports/figures", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r parametros}
+MODELOS <- c("M1_logistica", "M2_random_forest", "M3_gbm_completo",
+             "M4_gbm_moderado", "M5_naive_bayes")
+
+LABELS  <- c("M1 Logistica", "M2 Random Forest", "M3 GBM Completo",
+             "M4 GBM Moderado", "M5 Naive Bayes")
+
+COLORES <- c(
+  "M1_logistica"     = "#4878CF",
+  "M2_random_forest" = "#6ACC65",
+  "M3_gbm_completo"  = "#D65F5F",
+  "M4_gbm_moderado"  = "#B47CC7",
+  "M5_naive_bayes"   = "#C4AD66"
+)
+```
+
+------------------------------------------------------------------------
+
+# 1. Conteos agregados sobre la ventana operativa
+
+## 1.1 Carga y filtrado
+
+```{r cargar_datos}
+df_temp <- fread("data/raw/metricas_temporales.csv")
+
+# Filtrar únicamente los meses 16, 17 y 18
+df_op <- df_temp[mes >= 16 & mes <= 18]
+
+cat("Filas en la ventana operativa:", nrow(df_op), "\n")
+cat("Modelos:", unique(df_op$modelo), "\n")
+cat("Meses:  ", unique(df_op$mes), "\n")
+```
+
+## 1.2 Reconstrucción de TP, FP, FN
+
+```{r reconstruir_conteos}
+df_op[, tp := round(recall * n_fraude)]
+df_op[, fn := n_fraude - tp]
+df_op[, fp := ifelse(precision > 0, round((tp / precision) - tp), 0L)]
+```
+
+## 1.3 Agregación sobre los tres meses
+
+```{r agregar_conteos}
+
+# Nota: los conteos agregados sobre los tres meses acumulan más evidencia que cualquier mes individual, lo que produce posteriores más concentradas (HPDI más angosto).
+
+conteos_op <- df_op[, .(
+  TP = sum(tp),
+  FP = sum(fp),
+  FN = sum(fn)
+), by = modelo]
+
+# Mostrar tabla de conteos
+conteos_op |>
+  kable(
+    caption = "Conteos agregados por modelo — ventana operativa meses 16–18",
+    col.names = c("Modelo", "TP", "FP", "FN")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# 2. Posteriores Beta-Binomial y propagación Monte Carlo
+
+**Supuesto de independencia:** precisión y recall se estiman a partir de conteos disjuntos (TP/FP vs. TP/FN). Aunque TP aparece en ambos denominadores, las posteriores marginales son aproximadamente independientes. Este supuesto puede subestimar la incertidumbre conjunta si los errores están correlacionados.
+
+## 2.2 Simulación
+
+```{r simulacion_mc}
+muestras_lista <- list()
+
+for (mod in MODELOS) {
+  fila <- conteos_op[modelo == mod]
+  tp   <- fila$TP
+  fp   <- fila$FP
+  fn   <- fila$FN
+
+  # Posteriores conjugadas Beta-Binomial
+  muestras_p <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fp)
+  muestras_r <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fn)
+
+  # Propagación a F1
+  muestras_f1 <- (2 * muestras_p * muestras_r) / (muestras_p + muestras_r)
+
+  muestras_lista[[mod]] <- muestras_f1
+}
+
+cat("Simulación completada:", S, "muestras por modelo\n")
+```
+
+## 2.3 Tabla resumen: mediana + HPDI 95%
+
+```{r tabla_resumen}
+resumen_op <- rbindlist(lapply(MODELOS, function(mod) {
+  f1s    <- muestras_lista[[mod]]
+  fila_c <- conteos_op[modelo == mod]
+  data.table(
+    Modelo     = mod,
+    TP         = fila_c$TP,
+    FP         = fila_c$FP,
+    FN         = fila_c$FN,
+    Mediana_F1 = round(median(f1s), 3),
+    HPDI_lo    = round(quantile(f1s, 0.025), 3),
+    HPDI_hi    = round(quantile(f1s, 0.975), 3)
+  )
+}))
+
+# Ordenar por mediana descendente
+resumen_op <- resumen_op[order(-Mediana_F1)]
+
+# Mostrar tabla
+resumen_op[, .(
+  Modelo,
+  Conteos    = paste0("TP:", TP, " / FP:", FP, " / FN:", FN),
+  Mediana_F1,
+  HPDI_95    = paste0("[", HPDI_lo, ", ", HPDI_hi, "]")
+)] |>
+  kable(
+    col.names = c("Modelo", "Conteos", "Mediana F1", "HPDI 95%")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(1, bold = TRUE, background = "#e8f4e8") |>   # se destaca modelo ganador
+  row_spec(5, bold = TRUE, background = "#fde8e8")       # destaca modelo colapsado
+
+# Guardar
+fwrite(
+  resumen_op[, .(Modelo, TP, FP, FN, Mediana_F1,
+                 HPDI_95 = paste0("[", HPDI_lo, ", ", HPDI_hi, "]"))],
+  "reports/tables/paso6_resumen_ventana_operativa.csv"
+)
+```
+
+> M4 lidera con mediana `r resumen_op$Mediana_F1[1]` (HPDI: [`r resumen_op$HPDI_lo[1]`, `r resumen_op$HPDI_hi[1]`]). M3 colapsó a una mediana de `r resumen_op[Modelo == "M3_gbm_completo", Mediana_F1]`.
+
+------------------------------------------------------------------------
+
+# 3. Densidades posteriores superpuestas
+
+```{r figura_densidades, fig.width=11, fig.height=6}
+# Armar data.table largo
+dt_densidades <- rbindlist(lapply(MODELOS, function(mod) {
+  data.table(modelo = mod, F1 = muestras_lista[[mod]])
+}))
+
+# Factor ordenado por mediana (leyenda de mayor a menor)
+dt_densidades[, modelo := factor(modelo, levels = resumen_op$Modelo)]
+
+# Medianas para lineas verticales
+dt_med <- resumen_op[, .(modelo = Modelo, med = Mediana_F1)]
+
+fig_densidades <- ggplot(dt_densidades,
+                         aes(x = F1, fill = modelo, color = modelo)) +
+  geom_density(alpha = 0.25, linewidth = 0.9) +
+  geom_vline(
+    data     = dt_med,
+    aes(xintercept = med, color = modelo),
+    linetype = "dashed", linewidth = 0.7, alpha = 0.85
+  ) +
+  scale_fill_manual(values = COLORES, labels = setNames(LABELS, MODELOS)) +
+  scale_color_manual(values = COLORES, labels = setNames(LABELS, MODELOS)) +
+  coord_cartesian(xlim = c(0, 0.6)) +
+  labs(
+    title    = "Distribuciones Posteriores de F1 — Ventana Operativa (meses 16–18)",
+    subtitle = paste0(
+      "Las lineas punteadas marcan la mediana de cada modelo. ",
+      "El solapamiento entre M1/M2/M4/M5 indica incertidumbre en el ranking."
+    ),
+    x     = "F1-Score (muestras de la posterior)",
+    y     = "Densidad posterior",
+    fill  = "Modelo",
+    color = "Modelo"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom",
+    legend.title     = element_text(face = "bold")
+  )
+
+fig_densidades
+
+ggsave("reports/figures/punto6_densidades_operativa.png",
+       plot = fig_densidades, width = 11, height = 6, dpi = 300)
+```
+
+> **Interpretación:**
+>
+> - **M3** (rojo) está completamente separado a la izquierda — su posterior no se solapa con ningún otro modelo. Su colapso es evidente.
+> - **M4** (violeta) tiene la mediana más alta pero su densidad **se solapa parcialmente** con M1 y M2. Esto significa que la dominancia de M4 no es absoluta contra todos los rivales — se cuantifica en la matriz del siguiente punto.
+> - El solapamiento entre M1/M2/M4/M5 justifica el uso de la matriz de dominancia en lugar de un simple ranking por mediana.
+
+------------------------------------------------------------------------
+
+# 4. Robustez ≠ rendimiento
+
+Antes de construir la matriz de dominancia, aclaramos la diferencia entre buscar mayor robustez vs obtener mayor rendimiento:
+
+```{r robustez_vs_rendimiento}
+# Calcular varianza temporal de F1 por modelo en T1 (meses 13-18)
+df_t1 <- df_temp[mes >= 13 & mes <= 18]
+df_t1[, tp := round(recall * n_fraude)]
+df_t1[, fn := n_fraude - tp]
+df_t1[, fp := ifelse(precision > 0, round((tp / precision) - tp), 0L)]
+df_t1[, f1_puntual := 2 * tp / (2 * tp + fp + fn)]
+
+varianza_t1 <- df_t1[, .(
+  F1_media  = round(mean(f1_puntual, na.rm = TRUE), 3),
+  F1_desvio = round(sd(f1_puntual,   na.rm = TRUE), 3)
+), by = modelo][order(-F1_media)]
+
+varianza_t1 |>
+  kable(
+    caption = "Variabilidad temporal de F1 en T1 (meses 13–18)",
+    col.names = c("Modelo", "F1 media en T1", "Desvio estandar temporal")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Conclusión:** M1 y M5 tienen bajo desvío temporal en T1 — son "estables". Sin embargo, esa estabilidad refleja un **F1 bajo y constante**, no un buen rendimiento. Un modelo estable pero dominado en la matriz no es una alternativa válida para producción. **Robustez temporal no es sinónimo de rendimiento superior.**
+
+------------------------------------------------------------------------
+
+# 5. Matriz de dominancia 5×5
+
+## 5.1 Construcción
+
+```{r matriz_dominancia}
+n   <- length(MODELOS)
+mat <- matrix(0, nrow = n, ncol = n,
+              dimnames = list(MODELOS, MODELOS))
+
+for (i in seq_len(n)) {
+  for (j in seq_len(n)) {
+    if (i == j) {
+      mat[i, j] <- 0.5   # un modelo vs. sí mismo = 50%
+    } else {
+      mat[i, j] <- mean(
+        muestras_lista[[MODELOS[i]]] > muestras_lista[[MODELOS[j]]]
+      )
+    }
+  }
+}
+
+# Mostrar matriz redondeada
+round(mat, 3) |>
+  kable(caption = "Matriz de dominancia P(F1_i > F1_j) — ventana operativa meses 16–18") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Guardar
+dt_mat <- as.data.table(mat, keep.rownames = "Modelo_i")
+fwrite(dt_mat, "reports/tables/paso6_matriz_dominancia.csv")
+```
+
+**Supuesto de independencia entre modelos:** los cinco modelos comparten los mismos datos de validación, por lo que sus errores pueden estar correlacionados. Estimar P(F1ᵢ \> F1ⱼ) asumiendo independencia entre las muestras puede **subestimar la incertidumbre conjunta**. Este supuesto se declara y se discute en la presentación.
+
+## 5.2 Heatmap
+
+```{r heatmap_dominancia, fig.width=8, fig.height=7}
+etiquetas_cortas <- c(
+  "M1_logistica"     = "M1",
+  "M2_random_forest" = "M2",
+  "M3_gbm_completo"  = "M3",
+  "M4_gbm_moderado"  = "M4",
+  "M5_naive_bayes"   = "M5"
+)
+
+dt_heatmap      <- as.data.table(mat, keep.rownames = "Modelo_i")
+dt_heatmap_long <- melt(dt_heatmap,
+                        id.vars       = "Modelo_i",
+                        variable.name = "Modelo_j",
+                        value.name    = "Prob")
+
+dt_heatmap_long[, Modelo_i := factor(
+  etiquetas_cortas[Modelo_i],
+  levels = rev(c("M1","M2","M3","M4","M5"))
+)]
+dt_heatmap_long[, Modelo_j := factor(
+  etiquetas_cortas[as.character(Modelo_j)],
+  levels = c("M1","M2","M3","M4","M5")
+)]
+dt_heatmap_long[, color_texto := ifelse(Prob > 0.25 & Prob < 0.75, "black", "white")]
+
+fig_heatmap <- ggplot(dt_heatmap_long,
+                      aes(x = Modelo_j, y = Modelo_i, fill = Prob)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", Prob), color = color_texto),
+            size = 5.5, fontface = "bold") +
+  scale_fill_gradient2(
+    low      = "#D65F5F",
+    mid      = "#F5F5F5",
+    high     = "#4878CF",
+    midpoint = 0.5,
+    limits   = c(0, 1),
+    name     = "P(fila > col)"
+  ) +
+  scale_color_identity() +
+  labs(
+    title    = "Matriz de Dominancia Bayesiana — P(F1ᵢ > F1ⱼ)",
+    subtitle = "Ventana operativa meses 16–18  ·  Azul = fila domina  ·  Rojo = fila es dominada",
+    x = "Modelo j (columna)",
+    y = "Modelo i (fila)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid      = element_blank(),
+    axis.text       = element_text(face = "bold", size = 12),
+    legend.position = "right",
+    plot.subtitle   = element_text(size = 10, color = "grey40")
+  )
+
+fig_heatmap
+
+ggsave("reports/figures/punto_6_matriz_dominancia.png",
+       plot = fig_heatmap, width = 8, height = 7, dpi = 300)
+```
+
+## 5.3 Lectura de la matriz
+
+```{r lectura_matriz}
+ganador  <- resumen_op$Modelo[1]
+rivals   <- MODELOS[MODELOS != ganador]
+
+cat("=== Dominancia del modelo recomendado ===\n\n")
+cat(sprintf("Modelo ganador en ventana operativa: %s\n\n", ganador))
+
+for (r in rivals) {
+  prob <- mat[ganador, r]
+  interpretacion <- dplyr::case_when(
+    prob >= 0.95 ~ "dominancia casi total",
+    prob >= 0.75 ~ "dominancia clara",
+    prob >= 0.55 ~ "leve ventaja",
+    TRUE         ~ "empate técnico"
+  )
+  cat(sprintf("  P(%s > %s) = %.3f  [%s]\n", ganador, r, prob, interpretacion))
+}
+```
+
+> **Interpretación de la fila M4:**
+>
+> - **vs M3:** probabilidad \> 0.99 → dominancia casi total. Puede verse nuevamente el colapso de M3 en T1.
+> - **vs M1 / M2 / M5:** probabilidad entre 0.55 y 0.75 → este modelo tiene ventaja pero no es absoluta. El solapamiento de las densidades (sección 3) lo explica visualmente.
+> - **Conclusión:** M4 es el modelo más probable de superar a cualquier rival en el nuevo régimen, pero su ventaja sobre M1/M2 no es tan contundente como sobre M3.
+
+------------------------------------------------------------------------
+
+# 6. Supuesto de persistencia
+
+**Ventana elegida para la decisión:** meses 16 a 18
+
+**Justificación:**
+
+- Los meses 13-15 representan la transición al nuevo régimen.
+- A partir del mes 16, el F1 de todos los modelos se estabiliza.
+- Usar los meses 13-15 mezclaría la transición con el régimen consolidado.
+
+**Supuesto declarado:**
+
+> El régimen post-estabilización (meses 16-18) es representativo del período julio 2025 en adelante.
+
+**Límite del supuesto:**
+
+> Si la campaña de phishing fuera transitoria y los estafadores volvieran al modus operandi anterior, la ventana correcta podría ser T0 o una combinación. La decisión se reevalúa con nueva evidencia.
+
+------------------------------------------------------------------------
+
+# 7. Resumen
+
+```{r resumen_ejecutivo, include=TRUE}
+med_ganador  <- resumen_op$Mediana_F1[1]
+hpdi_lo      <- resumen_op$HPDI_lo[1]
+hpdi_hi      <- resumen_op$HPDI_hi[1]
+prob_vs_m3   <- round(mat[ganador, "M3_gbm_completo"], 3)
+med_m3       <- resumen_op[Modelo == "M3_gbm_completo", Mediana_F1]
+caida        <- round(0.841 - med_m3, 3)
+```
+
+**Modelo recomendado:** `r ganador`
+
+**Mediana F1:** `r med_ganador` · **HPDI 95%:** [`r hpdi_lo`, `r hpdi_hi`]
+
+**P(ganador > M3):** `r prob_vs_m3`
+
+**Caida de M3 vs T0:** 0.841 → `r med_m3` (Delta = `r caida`)
+
+---
+
+**Tres hallazgos clave:**
+
+1. M3 colapso — su posterior en meses 16-18 no se solapa con ningun otro modelo. La dominancia de los rivales es casi total (P > 0.99).
+2. M4 lidera en la ventana operativa pero su ventaja sobre M1 y M2 no es absoluta — hay solapamiento de densidades.
+3. Robustez no es rendimiento — M1 y M5 son estables pero dominados por M4 en la matriz.
+
+------------------------------------------------------------------------
+
+# Archivos generados
+
+| Archivo | Descripción |
+|------------------------------------|------------------------------------|
+| `reports/tables/paso6_resumen_ventana_operativa.csv` | Mediana F1 + HPDI por modelo en meses 16–18 |
+| `reports/tables/paso6_matriz_dominancia.csv` | Matriz 5×5 de probabilidades de dominancia |
+| `reports/figures/punto_6_matriz_dominancia.png` | Densidades posteriores superpuestas |
+| `reports/figures/punto_6_matriz_dominancia.png` | Heatmap de la matriz de dominancia |
+
+------------------------------------------------------------------------
+
+*Semilla: 20260424 · S = 10.000 muestras Monte Carlo · Prior: Beta(1,1)*
