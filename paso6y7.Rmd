@@ -35,7 +35,7 @@ Este paso construye tres objetos sobre esa **ventana operativa (meses 16 a 18)**
 2.  **Densidades posteriores de F1** superpuestas — para visualizar solapamiento.
 3.  **Matriz de dominancia 5×5** — P(F1ᵢ \> F1ⱼ) para cada par de modelos.
 
-> **Supuesto de persistencia declarado:** la decisión de julio 2025 se sostiene bajo el supuesto de que el régimen post-estabilización (meses 16–18) es representativo del período siguiente. Si la campaña de phishing fuera transitoria, la ventana correcta podría ser otra. Esta elección es metodológica y se argumenta en la presentación.
+**Supuesto de persistencia declarado:** la decisión de julio 2025 se sostiene bajo el supuesto de que el régimen post-estabilización (meses 16–18) es representativo del período siguiente. Si la campaña de phishing fuera transitoria, la ventana correcta podría ser otra. Esta elección es metodológica y se argumenta en la presentación.
 
 ------------------------------------------------------------------------
 
@@ -464,30 +464,20 @@ caida        <- round(0.841 - med_m3, 3)
 
 ------------------------------------------------------------------------
 
-*Semilla: 20260424 · S = 10.000 muestras Monte Carlo · Prior: Beta(1,1)*
-
-------------------------------------------------------------------------
-
 # Paso 7. Variable comprometida y recomendacion al APFLA
 
 ------------------------------------------------------------------------
 
-## 1 Que cambio en el mundo real
+## 1. Variable comprometida: terminal_risk_score
 
-A fines de 2024 los reportes de inteligencia operativa documentaron una campana masiva de smishing dirigida a clientes del banco. El nuevo modus operandi tiene una caracteristica critica que lo distingue del fraude tradicional:
+A fines de 2024 los reportes de inteligencia operativa documentaron una campana masiva de smishing dirigida a clientes del banco. El nuevo modus operandi tiene una caracteristica que lo distingue del fraude tradicional: Los estafadores utilizan credenciales robadas via SMS para operar desde terminales POS legitimas y sin historial de fraude previo.
 
-> Los estafadores utilizan **credenciales robadas via SMS** para operar desde **terminales POS legitimas y sin historial de fraude previo**.
+Esto es muy distinto al patron anterior, donde el fraude se concentraba en terminales comprometidas o de alto riesgo historico.
 
-Esto es radicalmente distinto al patron anterior, donde el fraude se concentraba en terminales comprometidas o de alto riesgo historico.
-
-------------------------------------------------------------------------
-
-## 2 Variable comprometida: terminal_risk_score
-
-La documentacion de los cinco modelos (archivo `metricas_T0_validacion.json`) revela las features de cada modelo:
+### 1.1 Features de los modelos
 
 ```{r tabla_features}
-# Tabla de features — construida a partir del JSON, no recalcula nada del Paso 6
+# Tabla de features — construida a partir de "metricas_T0_validacion.json"
 dt_features <- data.table(
   Modelo   = c("M1 Logistica", "M2 Random Forest", "M3 GBM Completo",
                "M4 GBM Moderado", "M5 Naive Bayes"),
@@ -511,33 +501,25 @@ dt_features |>
   row_spec(3, bold = TRUE, background = "#fde8e8")
 ```
 
-**`terminal_risk_score` es la unica variable exclusiva de M3**. Esta variable:
+**`terminal_risk_score`** es la unica variable exclusiva de M3. Esta variable:
 
-- Se construye con el **historial acumulado de la terminal POS** en los ultimos 90 dias
+- Se construye con el historial acumulado de la terminal POS en los ultimos 90 dias
 - Asigna score bajo a terminales con comportamiento historico limpio
 - Era el principal discriminador de M3 — la razon de su F1 = 0.841 en T0
 
-El mecanismo causal del colapso es el siguiente:
+### 1.2 Mecanismo causal del colapso
 
-```{r diagrama_causal, echo=FALSE}
-cat("
-Campana de smishing (INT-2024-12)
-          |
-          v
-Credenciales robadas usadas en terminales LIMPIAS
-          |
-          v
-terminal_risk_score = BAJO (historial sin fraude)
-          |
-          v
-M3 interpreta la operacion como legitima
-          |
-          v
-No dispara alerta -> FN aumenta -> Recall colapsa -> F1 colapsa
-")
-```
+I. En 2024 los estafadores enviaron SMS fraudulentos haciéndose pasar por el banco y obtuvieron usuario, contraseña y PIN de clientes reales. Con eso podían operar como si fueran el cliente legítimo.
 
-Los modelos M1, M2, M4 y M5 **no usan `terminal_risk_score`**. Sus features capturan el comportamiento transaccional (canal, dispositivo, hora, monto, secuencia) que detecta el patron anomalo del nuevo modus operandi independientemente del historial de la terminal. Por eso se mantienen estables en T1.
+II\. El fraude tradicional usaba terminales comprometidas, cajeros trucados, comercios cómplices. El nuevo modus operandi no necesita eso: con las credenciales del cliente, el estafador puede operar desde cualquier terminal legítima y sin antecedentes.
+
+III\. **`terminal_risk_score`** resume el historial de fraude de una terminal en los últimos 90 días. Una terminal limpia tiene score bajo. Antes del smishing el modelo lo tomaba como terminal segura. Después del smishing la terminal deja de ser segura pero M3 no lo sabe porque fue entrenado con la lógica anterior.
+
+IV\. Cuando llega una transacción desde una terminal con score bajo, M3 asume que la terminal es limpia o sea con riesgo bajo y no supera el umbral de clasificación. Al no disparar ningún alerta, el fraude pasa desapercibido.
+
+V. Cada fraude que pasa sin alerta es un Falso Negativo. Con el smishing masivo, los FN aumentan. Recall (TP / (TP + FN)) , cae con FN aumentando. Como F1 = 2PR/(P+R), si Recall tiende a 0 entonces F1 también.
+
+VI\. Los modelos M1, M2, M4 y M5 no usan **`terminal_risk_score`**. Sus features capturan el comportamiento transaccional (canal, dispositivo, hora, monto, secuencia) que detecta el patron anomalo del nuevo modus operandi independientemente del historial de la terminal. Por eso se mantienen estables en T1.
 
 ```{r evidencia_colapso}
 # Usa resumen_op del Paso 6 — no recalcula nada
@@ -561,19 +543,23 @@ data.table(
 
 ------------------------------------------------------------------------
 
-## 3 Analisis de sensibilidad — costos asimetricos (F-beta)
+## 2. Analisis de sensibilidad: costos asimetricos
 
-F1 pondera precision y recall por igual (beta = 1). En deteccion de fraude bancario este supuesto es fuerte: un falso negativo (fraude no detectado) implica perdida economica directa, mientras que un falso positivo (transaccion legitima bloqueada) implica friccion con el cliente.
+F1 pondera precision y recall por igual (beta = 1). En deteccion de fraude bancario este supuesto no es del todo correcto: un falso negativo (fraude no detectado) implica perdida economica directa, mientras que un falso positivo (transaccion legitima bloqueada) implica friccion con el cliente. Un banco preferiría cometer un error del tipo FP ya que no le genera costo financiero (aunque si pérdida en la satisfacción del cliente) que cometer muchos errores de FN.
+
+### 2.1. F-beta score
+
+Basado en la siguiente página <https://datasciencepythonblog.net/f-beta-score-scikit-learn/> , construimos el F-beta score, es decir, un F donde los pesos de Precision y Recall no son idénticos:\
 
 $$F_\beta = \frac{(1 + \beta^2) \cdot \text{Precision} \cdot \text{Recall}}{\beta^2 \cdot \text{Precision} + \text{Recall}}$$
 
 El parametro beta controla el peso relativo del recall sobre la precision:
 
-- **beta = 1**: recall y precision pesan igual (F1 estandar)
+- **beta = 1**: recall y precision pesan igual (F1 visto hasta el momento)
 - **beta \> 1**: recall vale mas — se penaliza mas no detectar un fraude
 - **beta \< 1**: precision vale mas — se penaliza mas molestar a un cliente legitimo
 
-**Por que no evaluamos beta \< 1 por defecto:** Asumir beta \< 1 significaria que bloquear una transaccion legitima es peor que dejar pasar un fraude — supuesto operativamente dificil de justificar sin informacion de costos explicita del APFLA. **Esta decision se declara, no se ignora.** De todas formas se incluye beta \< 1 en el barrido continuo para mostrar robustez en todo el rango.
+**Por que no evaluamos beta \< 1 por defecto:** Asumir beta \< 1 significaria que bloquear una transaccion legitima es peor que dejar pasar un fraude. Este supuesto es operativamente dificil de justificar sin informacion de costos explicita del APFLA. Esta decision se declara, no se ignora. De todas formas se incluye beta \< 1 en el barrido continuo para mostrar robustez en todo el rango.
 
 ```{r fbeta_setup, include=FALSE}
 # Funcion F-beta — unica novedad del Paso 7 respecto al Paso 6
@@ -593,7 +579,7 @@ for (mod in MODELOS) {
 }
 ```
 
-### Tabla de puntos discretos
+### 2.2 Tabla de puntos discretos
 
 ```{r fbeta_tabla}
 # Usa conteos_op (Paso 6) y muestras_p/r_lista (calculadas arriba)
@@ -620,7 +606,7 @@ tabla_fbeta |>
   row_spec(5, bold = TRUE, background = "#fde8e8")
 ```
 
-### Barrido continuo beta en [0.5, 3]
+### 2.3 Rango continuo beta en [0.5, 3]
 
 ```{r fbeta_barrido, fig.width=11, fig.height=6}
 # Usa muestras_p/r_lista, MODELOS, LABELS, COLORES y resumen_op — todos del Paso 6
@@ -673,11 +659,11 @@ ultimo_por_beta   <- dt_barrido[, .(ultimo  = modelo[which.min(mediana)]),  by =
 m3_siempre_ultimo <- all(ultimo_por_beta$ultimo == "M3_gbm_completo")
 ```
 
-> **Conclusion del barrido:** En todo el rango beta = [0.5, 3] el modelo ganador es siempre **`r ganador_siempre`** y M3 es `r ifelse(m3_siempre_ultimo, "siempre el ultimo", "no siempre el ultimo")`. La recomendacion de reemplazar M3 por M4 es **robusta a cualquier supuesto de costos razonable**, incluyendo escenarios donde la precision vale mas que el recall.
+**Conclusion:** Tanto en la tabla de puntos discretos como en el rango beta = [0.5, 3] el modelo ganador es siempre **`r ganador_siempre`** y M3 es `r ifelse(m3_siempre_ultimo, "siempre el ultimo", "no siempre el ultimo")`. La recomendacion de reemplazar M3 por M4 es **robusta a cualquier supuesto de costos razonable**, incluyendo escenarios donde la precision vale mas que el recall.
 
 ------------------------------------------------------------------------
 
-## 4 Recomendacion al APFLA en tres horizontes
+## 3 Recomendacion al APFLA en tres horizontes (a desarrollar)
 
 ```{r datos_rec, include=FALSE}
 # Todas estas variables ya existen del Paso 6 — solo las nombramos para claridad
@@ -690,36 +676,17 @@ hpdi_hi_m4  <- resumen_op[Modelo == "M4_gbm_moderado", HPDI_hi]
 med_m3_op   <- resumen_op[Modelo == "M3_gbm_completo",  Mediana_F1]
 ```
 
-### Horizonte inmediato — julio 2025
+### 3.1 Horizonte inmediato — julio 2025
 
 **Accion:** reemplazar M3 por **M4 (GBM Moderado)** en produccion.
 
-**Respaldo bayesiano:**
+### 3.2 Horizonte corto plazo — agosto a octubre 2025
 
-- Mediana F1 de M4 en ventana operativa: **`r med_m4`** (HPDI 95%: [`r hpdi_lo_m4`, `r hpdi_hi_m4`])
-- P(M4 \> M3) = **`r prob_m4_m3`** — dominancia total
-- P(M4 \> M2) = **`r prob_m4_m2`** — dominancia clara sobre el segundo mejor
-- Analisis F-beta confirma robustez del ranking en todo beta = [0.5, 3]
+**Reentrenar M3** excluyendo `terminal_risk_score`, o recalibrarlo con el nuevo patron de terminales limpias comprometidas.
 
-**Sobre la expectativa de recuperacion de M3:** la decision se toma con la evidencia disponible — los meses 16 a 18. En esa ventana M3 tiene mediana F1 = `r med_m3_op` y es dominado por todos los rivales con probabilidad 1.000. Sostener M3 esperando recuperacion ignoraria la evidencia posterior al cambio de distribucion. Si la campana cesa y hay nueva evidencia, la posterior se actualiza. La decision de hoy se toma con los datos de hoy.
+#### Alerta: señal de deterioro generalizado en meses 22-24
 
-------------------------------------------------------------------------
-
-### Horizonte corto plazo — agosto a octubre 2025
-
-1.  **Reentrenar M3** excluyendo `terminal_risk_score`, o recalibrarlo con el nuevo patron de terminales limpias comprometidas.
-
-2.  **Monitoreo bayesiano mensual** de M4: actualizar la posterior con los nuevos conteos TP/FP/FN auditados. Si la mediana cae mas de 0.05 puntos respecto del HPDI [`r hpdi_lo_m4`, `r hpdi_hi_m4`], activar revision.
-
-3.  **Vigilar la tension M4 vs M2:** P(M4 \> M2) = `r prob_m4_m2` — no es dominancia total. Si M2 muestra mejora sostenida, evaluar un cambio.
-
-4.  **Evaluar `secuencia_24h`** como señal anticipatoria del fraccionamiento de montos.
-
-------------------------------------------------------------------------
-
-### Alerta: señal de deterioro generalizado en meses 22-24 (expansion opcional)
-
-Los meses 19 a 24 del CSV son expansion opcional fuera del alcance principal. Sin embargo, los datos de los meses 22-24 (fase T2) revelan una señal critica:
+Los datos de los meses 22-24 (fase T2) revelan una señal critica:
 
 ```{r analisis_t2, fig.width=11, fig.height=5}
 # Usa df_temp que ya existe del Paso 6 — no recarga el CSV
@@ -743,7 +710,7 @@ tabla_t2 |>
   add_header_above(c(" " = 1, "Ventana operativa" = 3,
                      "T1 extendido" = 3, "T2 — alerta (*)" = 3)) |>
   column_spec(8:10, background = "#fff3cd") |>
-  footnote(general = "(*) Meses 22-24: expansion opcional fuera del analisis principal.")
+  footnote(general = "(*) Meses 22-24: expansion fuera del analisis principal.")
 ```
 
 ```{r t2_caida, include=FALSE}
@@ -754,47 +721,8 @@ caida_t2[, caida := round(f1_21 - f1_24, 3)]
 caida_max <- caida_t2[which.max(caida)]
 ```
 
-> **Señal de alerta T2:** a partir del mes 22 **todos los modelos** colapsan — no solo M3. El modelo con mayor caida es **`r caida_max$modelo`** con una perdida de `r caida_max$caida` puntos entre el mes 21 y el 24. Esto sugiere una **segunda perturbacion del regimen** que compromete features de comportamiento transaccional (canal, dispositivo, secuencia) — las mismas que habian protegido a M1/M2/M4/M5 durante T1. **M4 podria ser vulnerable** si la campana evoluciona.
+**Señal de alerta en T2:** a partir del mes 22 **todos los modelos** colapsan — no solo M3. El modelo con mayor caida es **`r caida_max$modelo`** con una perdida de `r caida_max$caida` puntos entre el mes 21 y el 24. Esto sugiere una **segunda perturbacion del regimen** que compromete features de comportamiento transaccional (canal, dispositivo, secuencia) — las mismas que habian protegido a M1/M2/M4/M5 durante T1. **M4 podria ser vulnerable** si la campana evoluciona.
 
-------------------------------------------------------------------------
+### 3.3 Horizonte mediano plazo — 2026
 
-### Horizonte mediano plazo — 2026
-
-1.  **DAG causal del drift:** formalizar como la campana modifica la distribucion de `terminal_risk_score | fraude`. La señal de T2 sugiere que otras variables podrian ser comprometidas en una segunda fase.
-
-2.  **Arquitectura de features resiliente:** ningun modelo futuro deberia depender de variables que puedan ser neutralizadas simultaneamente por un cambio de modus operandi.
-
-3.  **Sistema de alertas automaticas:** caida \> 0.15 puntos de F1 respecto del HPDI de referencia activa revision inmediata. La señal de T2 valida la urgencia.
-
-4.  **Revision del supuesto de costos:** incorporar la razon real FN/FP para calibrar el umbral de M4 segun el costo operativo de cada tipo de error.
-
-------------------------------------------------------------------------
-
-## 5 Resumen
-
-```{r tabla_recomendacion}
-# Usa prob_m4_m3, med_m4, hpdi_lo_m4, hpdi_hi_m4 — calculados en datos_rec
-data.table(
-  Horizonte = c("Inmediato (julio 2025)",
-                "Corto plazo (ago-oct 2025)",
-                "Mediano plazo (2026)"),
-  Accion    = c(
-    "Reemplazar M3 por M4 en produccion",
-    "Reentrenar M3, monitoreo bayesiano mensual, vigilar M4 vs M2, alerta T2",
-    "DAG causal del drift, arquitectura resiliente, alertas automaticas"
-  ),
-  Respaldo  = c(
-    paste0("P(M4>M3)=", prob_m4_m3, " | F1 M4=", med_m4,
-           " HPDI [", hpdi_lo_m4, ",", hpdi_hi_m4, "]"),
-    "Deterioro generalizado meses 22-24 sugiere segunda perturbacion",
-    "Señal T2 valida urgencia del sistema de alertas — DAG causal pendiente"
-  )
-) |>
-  kable(
-    caption   = "Recomendacion operativa al APFLA — tres horizontes",
-    col.names = c("Horizonte", "Accion principal", "Respaldo bayesiano")
-  ) |>
-  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
-  column_spec(1, bold = TRUE) |>
-  row_spec(1, background = "#e8f4e8")
-```
+ver...
