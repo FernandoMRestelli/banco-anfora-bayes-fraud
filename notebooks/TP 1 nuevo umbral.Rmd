@@ -1,0 +1,414 @@
+---
+title: "TP Inferencia bayesiana"
+output: html_notebook
+---
+
+Import libs
+```{r}
+library(tidyverse)
+library(data.table)
+library(rethinking)
+library(scales)
+library(arrow)
+library(ggplot2)
+library(dplyr)
+
+# Paquete del curso
+library(ibUBA)
+```
+
+Paso 5 nuevo umbral
+
+Repetir los pasos 2 a 4 mes por mes, sobre los meses 1 a 18 del archivo metricas_temporales.csv.
+Para cada celda (modelo, mes) construir una posterior F1 por Monte Carlo y reportar mediana
+con HPDI 95%. Graficar la trayectoria temporal: cinco líneas (una por modelo) con sombras
+HPDI, marcando con líneas verticales el mes 12 (fin de T0), el mes 13 (inicio del régimen alterado
+por la campaña de phishing) y el mes 16 (estabilización del nuevo régimen).
+
+```{r}
+
+df_validation_by_month <- read.csv("df_preds_new_threshold.csv")
+
+preds <- c('M1_predictions',	'M2_predictions',	'M3_predictions',	'M4_predictions',	'M5_predictions')
+
+results <- list()
+
+for(pred in preds){
+
+  tmp <- df_validation_by_month %>%
+    group_by(mes) %>%
+    summarise(
+      TP = sum(
+        es_fraude == "True" &
+        .data[[pred]] == 1,
+        na.rm = TRUE
+      ),
+
+      TN = sum(
+        es_fraude == "False" &
+        .data[[pred]] == 0,
+        na.rm = TRUE
+      ),
+
+      FP = sum(
+        es_fraude == "False" &
+        .data[[pred]] == 1,
+        na.rm = TRUE
+      ),
+
+      FN = sum(
+        es_fraude == "True" &
+        .data[[pred]] == 0,
+        na.rm = TRUE
+      ),
+
+      .groups = "drop"
+    ) %>%
+    mutate(
+      modelo = gsub("_predictions", "", pred)
+    ) %>%
+    select(modelo, mes, TP, TN, FP, FN)
+
+  results[[pred]] <- tmp
+}
+
+metricas_temporales <- bind_rows(results) %>%
+  arrange(modelo, mes)
+
+print(metricas_temporales, n=20)
+
+
+```
+Calc posterior for f1
+
+```{r}
+posterior_df <- metricas_temporales %>%
+  rowwise() %>%
+  mutate(
+
+    precision_samples = list(
+      rbeta(
+        10000,
+        1 + TP,
+        1 + FP
+      )
+    ),
+
+    recall_samples = list(
+      rbeta(
+        10000,
+        1 + TP,
+        1 + FN
+      )
+    ),
+
+    f1_samples = list({
+      p <- precision_samples
+      r <- recall_samples
+
+      2 * p * r / (p + r)
+    }),
+
+    precision_median = median(precision_samples),
+
+    recall_median = median(recall_samples),
+
+    f1_median = median(f1_samples),
+
+    hpdi = list(
+      hpdi(
+        f1_samples,
+        prob = 0.95
+      )
+    ),
+
+    f1_hpdi_lower = hpdi['lower'],
+    f1_hpdi_upper = hpdi['upper']
+
+  ) %>%
+  ungroup() %>%
+  select(
+    modelo,
+    mes,
+    TP,
+    TN,
+    FP,
+    FN,
+    precision_median,
+    recall_median,
+    f1_median,
+    f1_hpdi_lower,
+    f1_hpdi_upper
+  )
+print(posterior_df)
+```
+
+```{r}
+ggplot(
+  posterior_df,
+  aes(
+    x = mes,
+    y = f1_median,
+    color = modelo,
+    fill = modelo
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = f1_hpdi_lower,
+      ymax = f1_hpdi_upper
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  geom_line(
+    linewidth = 1
+  ) +
+  geom_point(
+    size = 1.5
+  ) +
+  geom_vline(
+    xintercept = c(13, 16),
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(posterior_df$mes),
+      max(posterior_df$mes),
+      by = 1
+    )
+  ) +
+  labs(
+    title = "Posterior F1 por mes",
+    x = "Month",
+    y = "Posterior median F1",
+    color = "Modelo",
+    fill = "Modelo"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom"
+  )
+```
+Domination matrix
+```{r}
+model_summary <- metricas_temporales %>%
+  group_by(modelo) %>%
+  summarise(
+    TP = sum(TP),
+    FP = sum(FP),
+    FN = sum(FN),
+    .groups = "drop"
+  )
+
+set.seed(123)
+
+f1_draws <- model_summary %>%
+  rowwise() %>%
+  mutate(
+    draws = list({
+      p <- rbeta(100000, 1 + TP, 1 + FP)
+      r <- rbeta(100000, 1 + TP, 1 + FN)
+
+      2 * p * r / (p + r)
+    })
+  )
+
+models <- f1_draws$modelo
+n_models <- length(models)
+
+dominance_f1 <- matrix(
+  NA,
+  nrow = n_models,
+  ncol = n_models,
+  dimnames = list(models, models)
+)
+
+for(i in seq_len(n_models)) {
+
+  draws_i <- f1_draws$draws[[i]]
+
+  for(j in seq_len(n_models)) {
+
+    draws_j <- f1_draws$draws[[j]]
+
+    dominance_f1[i, j] <-
+      mean(draws_i >= draws_j)
+
+  }
+}
+
+round(dominance_f1, 3)
+```
+Monetary matrix
+```{r}
+cost_fp <- 30000
+cost_fn <- 1750000
+
+cost_draws <- model_summary %>%
+  rowwise() %>%
+  mutate(
+    draws = list({
+
+      precision <- rbeta(
+        100000,
+        1 + TP,
+        1 + FP
+      )
+
+      recall <- rbeta(
+        100000,
+        1 + TP,
+        1 + FN
+      )
+
+      fp_draws <- TP * (1 - precision) / precision
+
+      fn_draws <- TP * (1 - recall) / recall
+
+      cost_fp * fp_draws +
+        cost_fn * fn_draws
+    })
+  )
+
+dominance_cost <- matrix(
+  NA,
+  nrow = n_models,
+  ncol = n_models,
+  dimnames = list(models, models)
+)
+
+for(i in seq_len(n_models)) {
+
+  draws_i <- cost_draws$draws[[i]]
+
+  for(j in seq_len(n_models)) {
+
+    draws_j <- cost_draws$draws[[j]]
+
+    dominance_cost[i, j] <-
+      mean(draws_i <= draws_j)
+
+  }
+}
+
+round(dominance_cost, 3)
+```
+
+Paso 6 nuevo umbral
+
+```{r}
+metricas_temporales_subset = metricas_temporales %>% filter(mes >= 13 & mes <= 16)
+```
+
+
+Domination matrix
+```{r}
+model_summary <- metricas_temporales_subset %>%
+  group_by(modelo) %>%
+  summarise(
+    TP = sum(TP),
+    FP = sum(FP),
+    FN = sum(FN),
+    .groups = "drop"
+  )
+
+set.seed(123)
+
+f1_draws <- model_summary %>%
+  rowwise() %>%
+  mutate(
+    draws = list({
+      p <- rbeta(100000, 1 + TP, 1 + FP)
+      r <- rbeta(100000, 1 + TP, 1 + FN)
+
+      2 * p * r / (p + r)
+    })
+  )
+
+models <- f1_draws$modelo
+n_models <- length(models)
+
+dominance_f1 <- matrix(
+  NA,
+  nrow = n_models,
+  ncol = n_models,
+  dimnames = list(models, models)
+)
+
+for(i in seq_len(n_models)) {
+
+  draws_i <- f1_draws$draws[[i]]
+
+  for(j in seq_len(n_models)) {
+
+    draws_j <- f1_draws$draws[[j]]
+
+    dominance_f1[i, j] <-
+      mean(draws_i >= draws_j)
+
+  }
+}
+
+round(dominance_f1, 3)
+```
+Monetary matrix
+```{r}
+cost_fp <- 30000
+cost_fn <- 1750000
+
+cost_draws <- model_summary %>%
+  rowwise() %>%
+  mutate(
+    draws = list({
+
+      precision <- rbeta(
+        100000,
+        1 + TP,
+        1 + FP
+      )
+
+      recall <- rbeta(
+        100000,
+        1 + TP,
+        1 + FN
+      )
+
+      fp_draws <- TP * (1 - precision) / precision
+
+      fn_draws <- TP * (1 - recall) / recall
+
+      cost_fp * fp_draws +
+        cost_fn * fn_draws
+    })
+  )
+
+dominance_cost <- matrix(
+  NA,
+  nrow = n_models,
+  ncol = n_models,
+  dimnames = list(models, models)
+)
+
+for(i in seq_len(n_models)) {
+
+  draws_i <- cost_draws$draws[[i]]
+
+  for(j in seq_len(n_models)) {
+
+    draws_j <- cost_draws$draws[[j]]
+
+    dominance_cost[i, j] <-
+      mean(draws_i <= draws_j)
+
+  }
+}
+
+round(dominance_cost, 3)
+```
+
+
+
+
+
