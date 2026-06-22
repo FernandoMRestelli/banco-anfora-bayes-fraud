@@ -1,0 +1,887 @@
+---
+title: "PASO 6 y 7"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = FALSE,
+  warning   = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+------------------------------------------------------------------------
+
+# Paso 6. Posteriores y matriz de dominancia en la ventana operativa
+
+En el paso anterior se vio que **M3 colapsa progresivamente desde el mes 13**, mientras los otros cuatro modelos mantuvieron un rendimiento estable. A partir del mes 16 el nuevo escenario se estabiliza: los estafadores consolidaron su modus operandi y con ello los modelos encontraron un nuevo piso de performance.
+
+Este paso construye tres objetos sobre esa **ventana operativa (meses 16 a 18)**:
+
+1.  **Posteriores Beta-Binomial agregadas** por modelo — mediana y HPDI 95%.
+2.  **Densidades posteriores de F1** superpuestas — para visualizar solapamiento.
+3.  **Matriz de dominancia 5×5** — P(F1ᵢ \> F1ⱼ) para cada par de modelos.
+
+**Supuesto de persistencia declarado:** la decisión de julio 2025 se sostiene bajo el supuesto de que el régimen post-estabilización (meses 16–18) es representativo del período siguiente. Si la campaña de phishing fuera transitoria, la ventana correcta podría ser otra. Esta elección es metodológica y se argumenta en la presentación.
+
+------------------------------------------------------------------------
+
+## Setup
+
+```{r librerias}
+library(data.table)
+library(ggplot2)
+library(kableExtra)
+
+# Semilla oficial del caso
+set.seed(20260424)
+
+# Tamaño de muestra Monte Carlo (se pidió un mínimo de 5000, en este caso usé 10000 que debería tener el mismo o parecido resultado)
+S <- 10000
+
+# Crear carpetas de salida
+dir.create("reports/tables",  recursive = TRUE, showWarnings = FALSE)
+dir.create("reports/figures", recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r parametros}
+MODELOS <- c("M1_logistica", "M2_random_forest", "M3_gbm_completo",
+             "M4_gbm_moderado", "M5_naive_bayes")
+
+LABELS  <- c("M1 Logistica", "M2 Random Forest", "M3 GBM Completo",
+             "M4 GBM Moderado", "M5 Naive Bayes")
+
+COLORES <- c(
+  "M1_logistica"     = "#4878CF",
+  "M2_random_forest" = "#6ACC65",
+  "M3_gbm_completo"  = "#D65F5F",
+  "M4_gbm_moderado"  = "#B47CC7",
+  "M5_naive_bayes"   = "#C4AD66"
+)
+```
+
+------------------------------------------------------------------------
+
+## 1. Conteos agregados sobre la ventana operativa
+
+### 1.1 Carga y filtrado
+
+```{r cargar_datos}
+df_temp <- fread("data/raw/metricas_temporales.csv")
+
+# Filtrar únicamente los meses 16, 17 y 18
+df_op <- df_temp[mes >= 16 & mes <= 18]
+
+cat("Filas en la ventana operativa:", nrow(df_op), "\n")
+cat("Modelos:", unique(df_op$modelo), "\n")
+cat("Meses:  ", unique(df_op$mes), "\n")
+```
+
+### 1.2 Reconstrucción de TP, FP, FN
+
+```{r reconstruir_conteos}
+df_op[, tp := round(recall * n_fraude)]
+df_op[, fn := n_fraude - tp]
+df_op[, fp := ifelse(precision > 0, round((tp / precision) - tp), 0L)]
+```
+
+### 1.3 Agregación sobre los tres meses
+
+```{r agregar_conteos}
+
+# Nota: los conteos agregados sobre los tres meses acumulan más evidencia que cualquier mes individual, lo que produce posteriores más concentradas (HPDI más angosto).
+
+conteos_op <- df_op[, .(
+  TP = sum(tp),
+  FP = sum(fp),
+  FN = sum(fn)
+), by = modelo]
+
+# Mostrar tabla de conteos
+conteos_op |>
+  kable(
+    caption = "Conteos agregados por modelo — ventana operativa meses 16–18",
+    col.names = c("Modelo", "TP", "FP", "FN")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## 2. Posteriores Beta-Binomial y propagación Monte Carlo
+
+**Supuesto de independencia:** precisión y recall se estiman a partir de conteos disjuntos (TP/FP vs. TP/FN). Aunque TP aparece en ambos denominadores, las posteriores marginales son aproximadamente independientes. Este supuesto puede subestimar la incertidumbre conjunta si los errores están correlacionados.
+
+### 2.1 Simulación
+
+```{r simulacion_mc}
+muestras_lista <- list()
+
+for (mod in MODELOS) {
+  fila <- conteos_op[modelo == mod]
+  tp   <- fila$TP
+  fp   <- fila$FP
+  fn   <- fila$FN
+
+  # Posteriores conjugadas Beta-Binomial
+  muestras_p <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fp)
+  muestras_r <- rbeta(S, shape1 = 1 + tp, shape2 = 1 + fn)
+
+  # Propagación a F1
+  muestras_f1 <- (2 * muestras_p * muestras_r) / (muestras_p + muestras_r)
+
+  muestras_lista[[mod]] <- muestras_f1
+}
+
+cat("Simulación completada:", S, "muestras por modelo\n")
+```
+
+### 2.2 Tabla resumen: mediana + HPDI 95%
+
+```{r tabla_resumen}
+resumen_op <- rbindlist(lapply(MODELOS, function(mod) {
+  f1s    <- muestras_lista[[mod]]
+  fila_c <- conteos_op[modelo == mod]
+  data.table(
+    Modelo     = mod,
+    TP         = fila_c$TP,
+    FP         = fila_c$FP,
+    FN         = fila_c$FN,
+    Mediana_F1 = round(median(f1s), 3),
+    HPDI_lo    = round(quantile(f1s, 0.025), 3),
+    HPDI_hi    = round(quantile(f1s, 0.975), 3)
+  )
+}))
+
+# Ordenar por mediana descendente
+resumen_op <- resumen_op[order(-Mediana_F1)]
+
+# Mostrar tabla
+resumen_op[, .(
+  Modelo,
+  Conteos    = paste0("TP:", TP, " / FP:", FP, " / FN:", FN),
+  Mediana_F1,
+  HPDI_95    = paste0("[", HPDI_lo, ", ", HPDI_hi, "]")
+)] |>
+  kable(
+    col.names = c("Modelo", "Conteos", "Mediana F1", "HPDI 95%")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(1, bold = TRUE, background = "#e8f4e8") |>   # se destaca modelo ganador
+  row_spec(5, bold = TRUE, background = "#fde8e8")       # destaca modelo colapsado
+
+# Guardar
+fwrite(
+  resumen_op[, .(Modelo, TP, FP, FN, Mediana_F1,
+                 HPDI_95 = paste0("[", HPDI_lo, ", ", HPDI_hi, "]"))],
+  "reports/tables/paso6_resumen_ventana_operativa.csv"
+)
+```
+
+> M4 lidera con mediana `r resumen_op$Mediana_F1[1]` (HPDI: [`r resumen_op$HPDI_lo[1]`, `r resumen_op$HPDI_hi[1]`]). M3 colapsó a una mediana de `r resumen_op[Modelo == "M3_gbm_completo", Mediana_F1]`.
+
+------------------------------------------------------------------------
+
+## 3. Densidades posteriores superpuestas
+
+```{r figura_densidades, fig.width=11, fig.height=6}
+# Armar data.table largo
+dt_densidades <- rbindlist(lapply(MODELOS, function(mod) {
+  data.table(modelo = mod, F1 = muestras_lista[[mod]])
+}))
+
+# Factor ordenado por mediana (leyenda de mayor a menor)
+dt_densidades[, modelo := factor(modelo, levels = resumen_op$Modelo)]
+
+# Medianas para lineas verticales
+dt_med <- resumen_op[, .(modelo = Modelo, med = Mediana_F1)]
+
+fig_densidades <- ggplot(dt_densidades,
+                         aes(x = F1, fill = modelo, color = modelo)) +
+  geom_density(alpha = 0.25, linewidth = 0.9) +
+  geom_vline(
+    data     = dt_med,
+    aes(xintercept = med, color = modelo),
+    linetype = "dashed", linewidth = 0.7, alpha = 0.85
+  ) +
+  scale_fill_manual(values = COLORES, labels = setNames(LABELS, MODELOS)) +
+  scale_color_manual(values = COLORES, labels = setNames(LABELS, MODELOS)) +
+  coord_cartesian(xlim = c(0, 0.6)) +
+  labs(
+    title    = "Distribuciones Posteriores de F1 — Ventana Operativa (meses 16–18)",
+    subtitle = paste0(
+      "Las lineas punteadas marcan la mediana de cada modelo. ",
+      "El solapamiento entre M1/M2/M4/M5 indica incertidumbre en el ranking."
+    ),
+    x     = "F1-Score (muestras de la posterior)",
+    y     = "Densidad posterior",
+    fill  = "Modelo",
+    color = "Modelo"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom",
+    legend.title     = element_text(face = "bold")
+  )
+
+fig_densidades
+
+ggsave("reports/figures/punto6_densidades_operativa.png",
+       plot = fig_densidades, width = 11, height = 6, dpi = 300)
+```
+
+> **Interpretación:**
+>
+> - **M3** (rojo) está completamente separado a la izquierda — su posterior no se solapa con ningún otro modelo. Su colapso es evidente.
+> - **M4** (violeta) tiene la mediana más alta pero su densidad **se solapa parcialmente** con M1 y M2. Esto significa que la dominancia de M4 no es absoluta contra todos los rivales — se cuantifica en la matriz del siguiente punto.
+> - El solapamiento entre M1/M2/M4/M5 justifica el uso de la matriz de dominancia en lugar de un simple ranking por mediana.
+
+------------------------------------------------------------------------
+
+## 4. Robustez ≠ rendimiento
+
+Antes de construir la matriz de dominancia, aclaramos la diferencia entre buscar mayor robustez vs obtener mayor rendimiento:
+
+```{r robustez_vs_rendimiento}
+# Calcular varianza temporal de F1 por modelo en T1 (meses 13-18)
+df_t1 <- df_temp[mes >= 13 & mes <= 18]
+df_t1[, tp := round(recall * n_fraude)]
+df_t1[, fn := n_fraude - tp]
+df_t1[, fp := ifelse(precision > 0, round((tp / precision) - tp), 0L)]
+df_t1[, f1_puntual := 2 * tp / (2 * tp + fp + fn)]
+
+varianza_t1 <- df_t1[, .(
+  F1_media  = round(mean(f1_puntual, na.rm = TRUE), 3),
+  F1_desvio = round(sd(f1_puntual,   na.rm = TRUE), 3)
+), by = modelo][order(-F1_media)]
+
+varianza_t1 |>
+  kable(
+    caption = "Variabilidad temporal de F1 en T1 (meses 13–18)",
+    col.names = c("Modelo", "F1 media en T1", "Desvio estandar temporal")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Conclusión:** M1 y M5 tienen bajo desvío temporal en T1 — son "estables". Sin embargo, esa estabilidad refleja un **F1 bajo y constante**, no un buen rendimiento. Un modelo estable pero dominado en la matriz no es una alternativa válida para producción. **Robustez temporal no es sinónimo de rendimiento superior.**
+
+------------------------------------------------------------------------
+
+## 5. Matriz de dominancia 5×5
+
+### 5.1 Construcción
+
+```{r matriz_dominancia}
+n   <- length(MODELOS)
+mat <- matrix(0, nrow = n, ncol = n,
+              dimnames = list(MODELOS, MODELOS))
+
+for (i in seq_len(n)) {
+  for (j in seq_len(n)) {
+    if (i == j) {
+      mat[i, j] <- 0.5   # un modelo vs. sí mismo = 50%
+    } else {
+      mat[i, j] <- mean(
+        muestras_lista[[MODELOS[i]]] > muestras_lista[[MODELOS[j]]]
+      )
+    }
+  }
+}
+
+# Mostrar matriz redondeada
+round(mat, 3) |>
+  kable(caption = "Matriz de dominancia P(F1_i > F1_j) — ventana operativa meses 16–18") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Guardar
+dt_mat <- as.data.table(mat, keep.rownames = "Modelo_i")
+fwrite(dt_mat, "reports/tables/paso6_matriz_dominancia.csv")
+```
+
+**Supuesto de independencia entre modelos:** los cinco modelos comparten los mismos datos de validación, por lo que sus errores pueden estar correlacionados. Estimar P(F1ᵢ \> F1ⱼ) asumiendo independencia entre las muestras puede **subestimar la incertidumbre conjunta**. Este supuesto se declara y se discute en la presentación.
+
+### 5.2 Heatmap
+
+```{r heatmap_dominancia, fig.width=8, fig.height=7}
+etiquetas_cortas <- c(
+  "M1_logistica"     = "M1",
+  "M2_random_forest" = "M2",
+  "M3_gbm_completo"  = "M3",
+  "M4_gbm_moderado"  = "M4",
+  "M5_naive_bayes"   = "M5"
+)
+
+dt_heatmap      <- as.data.table(mat, keep.rownames = "Modelo_i")
+dt_heatmap_long <- melt(dt_heatmap,
+                        id.vars       = "Modelo_i",
+                        variable.name = "Modelo_j",
+                        value.name    = "Prob")
+
+dt_heatmap_long[, Modelo_i := factor(
+  etiquetas_cortas[Modelo_i],
+  levels = rev(c("M1","M2","M3","M4","M5"))
+)]
+dt_heatmap_long[, Modelo_j := factor(
+  etiquetas_cortas[as.character(Modelo_j)],
+  levels = c("M1","M2","M3","M4","M5")
+)]
+dt_heatmap_long[, color_texto := ifelse(Prob > 0.25 & Prob < 0.75, "black", "white")]
+
+fig_heatmap <- ggplot(dt_heatmap_long,
+                      aes(x = Modelo_j, y = Modelo_i, fill = Prob)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = sprintf("%.2f", Prob), color = color_texto),
+            size = 5.5, fontface = "bold") +
+  scale_fill_gradient2(
+    low      = "#D65F5F",
+    mid      = "#F5F5F5",
+    high     = "#4878CF",
+    midpoint = 0.5,
+    limits   = c(0, 1),
+    name     = "P(fila > col)"
+  ) +
+  scale_color_identity() +
+  labs(
+    title    = "Matriz de Dominancia Bayesiana — P(F1ᵢ > F1ⱼ)",
+    subtitle = "Ventana operativa meses 16–18  ·  Azul = fila domina  ·  Rojo = fila es dominada",
+    x = "Modelo j (columna)",
+    y = "Modelo i (fila)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid      = element_blank(),
+    axis.text       = element_text(face = "bold", size = 12),
+    legend.position = "right",
+    plot.subtitle   = element_text(size = 10, color = "grey40")
+  )
+
+fig_heatmap
+
+ggsave("reports/figures/punto_6_matriz_dominancia.png",
+       plot = fig_heatmap, width = 8, height = 7, dpi = 300)
+```
+
+### 5.3 Lectura de la matriz
+
+```{r lectura_matriz}
+ganador  <- resumen_op$Modelo[1]
+rivals   <- MODELOS[MODELOS != ganador]
+
+cat("=== Dominancia del modelo recomendado ===\n\n")
+cat(sprintf("Modelo ganador en ventana operativa: %s\n\n", ganador))
+
+for (r in rivals) {
+  prob <- mat[ganador, r]
+  interpretacion <- dplyr::case_when(
+    prob >= 0.95 ~ "dominancia casi total",
+    prob >= 0.75 ~ "dominancia clara",
+    prob >= 0.55 ~ "leve ventaja",
+    TRUE         ~ "empate técnico"
+  )
+  cat(sprintf("  P(%s > %s) = %.3f  [%s]\n", ganador, r, prob, interpretacion))
+}
+```
+
+> **Interpretación de la fila M4:**
+>
+> - **vs M3:** probabilidad \> 0.99 → dominancia casi total. Puede verse nuevamente el colapso de M3 en T1.
+> - **vs M1 / M2 / M5:** probabilidad entre 0.55 y 0.75 → este modelo tiene ventaja pero no es absoluta. El solapamiento de las densidades (sección 3) lo explica visualmente.
+> - **Conclusión:** M4 es el modelo más probable de superar a cualquier rival en el nuevo régimen, pero su ventaja sobre M1/M2 no es tan contundente como sobre M3.
+
+------------------------------------------------------------------------
+
+## 6. Supuesto de persistencia
+
+**Ventana elegida para la decisión:** meses 16 a 18
+
+**Justificación:**
+
+- Los meses 13-15 representan la transición al nuevo régimen.
+- A partir del mes 16, el F1 de todos los modelos se estabiliza.
+- Usar los meses 13-15 mezclaría la transición con el régimen consolidado.
+
+**Supuesto declarado:**
+
+> El régimen post-estabilización (meses 16-18) es representativo del período julio 2025 en adelante.
+
+**Límite del supuesto:**
+
+> Si la campaña de phishing fuera transitoria y los estafadores volvieran al modus operandi anterior, la ventana correcta podría ser T0 o una combinación. La decisión se reevalúa con nueva evidencia.
+
+------------------------------------------------------------------------
+
+## 7. Resumen
+
+```{r resumen_ejecutivo, include=TRUE}
+med_ganador  <- resumen_op$Mediana_F1[1]
+hpdi_lo      <- resumen_op$HPDI_lo[1]
+hpdi_hi      <- resumen_op$HPDI_hi[1]
+prob_vs_m3   <- round(mat[ganador, "M3_gbm_completo"], 3)
+med_m3       <- resumen_op[Modelo == "M3_gbm_completo", Mediana_F1]
+caida        <- round(0.841 - med_m3, 3)
+```
+
+**Modelo recomendado:** `r ganador`
+
+**Mediana F1:** `r med_ganador` · **HPDI 95%:** [`r hpdi_lo`, `r hpdi_hi`]
+
+**P(ganador \> M3):** `r prob_vs_m3`
+
+**Caida de M3 vs T0:** 0.841 → `r med_m3` (Delta = `r caida`)
+
+------------------------------------------------------------------------
+
+**Tres hallazgos clave:**
+
+1.  M3 colapso — su posterior en meses 16-18 no se solapa con ningun otro modelo. La dominancia de los rivales es casi total (P \> 0.99).
+2.  M4 lidera en la ventana operativa pero su ventaja sobre M1 y M2 no es absoluta — hay solapamiento de densidades.
+3.  Robustez no es rendimiento — M1 y M5 son estables pero dominados por M4 en la matriz.
+
+------------------------------------------------------------------------
+
+## Archivos generados
+
+| Archivo | Descripción |
+|------------------------------------|------------------------------------|
+| `reports/tables/paso6_resumen_ventana_operativa.csv` | Mediana F1 + HPDI por modelo en meses 16–18 |
+| `reports/tables/paso6_matriz_dominancia.csv` | Matriz 5×5 de probabilidades de dominancia |
+| `reports/figures/punto_6_matriz_dominancia.png` | Densidades posteriores superpuestas |
+| `reports/figures/punto_6_matriz_dominancia.png` | Heatmap de la matriz de dominancia |
+
+------------------------------------------------------------------------
+
+# Paso 7. Variable comprometida y recomendacion al APFLA
+
+------------------------------------------------------------------------
+
+## 1. Variable comprometida: terminal_risk_score
+
+A fines de 2024 los reportes de inteligencia operativa documentaron una campana masiva de smishing dirigida a clientes del banco. El nuevo modus operandi tiene una caracteristica que lo distingue del fraude tradicional: Los estafadores utilizan credenciales robadas via SMS para operar desde terminales POS legitimas y sin historial de fraude previo.
+
+Esto es muy distinto al patron anterior, donde el fraude se concentraba en terminales comprometidas o de alto riesgo historico.
+
+### 1.1 Features de los modelos
+
+```{r tabla_features}
+# Tabla de features — construida a partir de "metricas_T0_validacion.json"
+dt_features <- data.table(
+  Modelo   = c("M1 Logistica", "M2 Random Forest", "M3 GBM Completo",
+               "M4 GBM Moderado", "M5 Naive Bayes"),
+  Features = c(
+    "monto_log, canal, dispositivo",
+    "monto_log, secuencia_24h, canal, dispositivo, hora_bin",
+    "monto_log, secuencia_24h, **terminal_risk_score**, canal, dispositivo, hora_bin",
+    "monto_log, secuencia_24h, canal, dispositivo, hora_bin",
+    "monto_log, secuencia_24h"
+  ),
+  Usa_TRS = c("No", "No", "**SI — exclusivo**", "No", "No")
+)
+
+dt_features |>
+  kable(
+    caption  = "Features por modelo — fuente: metricas_T0_validacion.json",
+    col.names = c("Modelo", "Variables de entrada", "terminal_risk_score"),
+    escape   = FALSE
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(3, bold = TRUE, background = "#fde8e8")
+```
+
+**`terminal_risk_score`** es la unica variable exclusiva de M3. Esta variable:
+
+- Se construye con el historial acumulado de la terminal POS en los ultimos 90 dias
+- Asigna score bajo a terminales con comportamiento historico limpio
+- Era el principal discriminador de M3 — la razon de su F1 = 0.841 en T0
+
+### 1.2 Mecanismo causal del colapso
+
+I. En 2024 los estafadores enviaron SMS fraudulentos haciéndose pasar por el banco y obtuvieron usuario, contraseña y PIN de clientes reales. Con eso podían operar como si fueran el cliente legítimo.
+
+II\. El fraude tradicional usaba terminales comprometidas, cajeros trucados, comercios cómplices. El nuevo modus operandi no necesita eso: con las credenciales del cliente, el estafador puede operar desde cualquier terminal legítima y sin antecedentes.
+
+III\. **`terminal_risk_score`** resume el historial de fraude de una terminal en los últimos 90 días. Una terminal limpia tiene score bajo. Antes del smishing el modelo lo tomaba como terminal segura. Después del smishing la terminal deja de ser segura pero M3 no lo sabe porque fue entrenado con la lógica anterior.
+
+IV\. Cuando llega una transacción desde una terminal con score bajo, M3 asume que la terminal es limpia o sea con riesgo bajo y no supera el umbral de clasificación. Al no disparar ningún alerta, el fraude pasa desapercibido.
+
+V. Cada fraude que pasa sin alerta es un Falso Negativo. Con el smishing masivo, los FN aumentan. Recall (TP / (TP + FN)) , cae con FN aumentando. Como F1 = 2PR/(P+R), si Recall tiende a 0 entonces F1 también.
+
+VI\. Los modelos M1, M2, M4 y M5 no usan **`terminal_risk_score`**. Sus features capturan el comportamiento transaccional (canal, dispositivo, hora, monto, secuencia) que detecta el patron anomalo del nuevo modus operandi independientemente del historial de la terminal. Por eso se mantienen estables en T1.
+
+```{r evidencia_colapso}
+# Usa resumen_op del Paso 6 — no recalcula nada
+data.table(
+  Ventana  = c("T0 (meses 1-12)", "Ventana operativa (meses 16-18)"),
+  M3_F1    = c(0.841,
+               round(resumen_op[Modelo == "M3_gbm_completo", Mediana_F1], 3)),
+  M4_F1    = c(0.236,
+               round(resumen_op[Modelo == "M4_gbm_moderado",  Mediana_F1], 3)),
+  Caida_M3 = c("-",
+               as.character(round(0.841 -
+                 resumen_op[Modelo == "M3_gbm_completo", Mediana_F1], 3)))
+) |>
+  kable(
+    caption   = "Caida de F1: M3 vs M4 entre T0 y ventana operativa",
+    col.names = c("Ventana", "F1 M3", "F1 M4", "Caida M3")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(2, bold = TRUE, background = "#fde8e8")
+```
+
+------------------------------------------------------------------------
+
+## 2. Analisis de sensibilidad: costos asimetricos
+
+F1 pondera precision y recall por igual (beta = 1). En deteccion de fraude bancario este supuesto no es del todo correcto: un falso negativo (fraude no detectado) implica perdida economica directa, mientras que un falso positivo (transaccion legitima bloqueada) implica friccion con el cliente. Un banco preferiría cometer un error del tipo FP ya que no le genera costo financiero (aunque si pérdida en la satisfacción del cliente) que cometer muchos errores de FN.
+
+### 2.1. F-beta score
+
+Basado en la siguiente página <https://datasciencepythonblog.net/f-beta-score-scikit-learn/> , construimos el F-beta score, es decir, un F donde los pesos de Precision y Recall no son idénticos:\
+
+$$F_\beta = \frac{(1 + \beta^2) \cdot \text{Precision} \cdot \text{Recall}}{\beta^2 \cdot \text{Precision} + \text{Recall}}$$
+
+El parametro beta controla el peso relativo del recall sobre la precision:
+
+- **beta = 1**: recall y precision pesan igual (F1 visto hasta el momento)
+- **beta \> 1**: recall vale mas — se penaliza mas no detectar un fraude
+- **beta \< 1**: precision vale mas — se penaliza mas molestar a un cliente legitimo
+
+**Por que no evaluamos beta \< 1 por defecto:** Asumir beta \< 1 significaria que bloquear una transaccion legitima es peor que dejar pasar un fraude. Este supuesto es operativamente dificil de justificar sin informacion de costos explicita del APFLA. Esta decision se declara, no se ignora. De todas formas se incluye beta \< 1 en el barrido continuo para mostrar robustez en todo el rango.
+
+**Limitacion metodologica declarada:** los valores de precision y recall usados en este analisis corresponden al **threshold fijo** que cada modelo trae por defecto — el que fue elegido originalmente para maximizar F1 (beta=1) en T0. Cambiar beta en la formula sin recalcular el threshold optimo para ese beta es una inconsistencia: si beta=2 penaliza mas el recall, el threshold optimo para ese escenario ya no es el mismo que maximiza F1, sino uno mas bajo (mas alertas, mayor recall, menor precision). La seccion 2.4 resuelve esta limitacion usando las probabilidades crudas de cada modelo y recalculando el threshold que minimiza el riesgo financiero real.
+
+```{r fbeta_setup, include=FALSE}
+# Funcion F-beta — unica novedad del Paso 7 respecto al Paso 6
+f_beta <- function(p, r, beta) {
+  (1 + beta^2) * p * r / (beta^2 * p + r)
+}
+
+# Muestras de precision y recall por modelo — el Paso 6 guarda muestras_lista (F1)
+# pero no las muestras separadas de p y r, por eso las generamos aqui una sola vez.
+# Reutilizamos conteos_op que ya existe del Paso 6.
+muestras_p_lista <- list()
+muestras_r_lista <- list()
+for (mod in MODELOS) {
+  fila <- conteos_op[modelo == mod]
+  muestras_p_lista[[mod]] <- rbeta(S, shape1 = 1 + fila$TP, shape2 = 1 + fila$FP)
+  muestras_r_lista[[mod]] <- rbeta(S, shape1 = 1 + fila$TP, shape2 = 1 + fila$FN)
+}
+```
+
+### 2.2 Tabla de puntos discretos
+
+```{r fbeta_tabla}
+# Usa conteos_op (Paso 6) y muestras_p/r_lista (calculadas arriba)
+betas_tabla <- c(0.5, 1, 1.5, 2, 3)
+
+resultados_fbeta <- rbindlist(lapply(betas_tabla, function(b) {
+  rbindlist(lapply(MODELOS, function(mod) {
+    fb <- f_beta(muestras_p_lista[[mod]], muestras_r_lista[[mod]], b)
+    data.table(Beta = paste0("beta=", b), Modelo = mod,
+               Mediana = round(median(fb), 3))
+  }))
+}))
+
+tabla_fbeta <- dcast(resultados_fbeta, Modelo ~ Beta, value.var = "Mediana")
+tabla_fbeta <- tabla_fbeta[order(-`beta=1`)]
+
+tabla_fbeta |>
+  kable(
+    caption   = "Mediana F-beta por modelo — ventana operativa (beta = 0.5 a 3)",
+    col.names = c("Modelo", "beta=0.5", "beta=1 (F1)", "beta=1.5", "beta=2", "beta=3")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(1, bold = TRUE, background = "#e8f4e8") |>
+  row_spec(5, bold = TRUE, background = "#fde8e8")
+```
+
+### 2.3 Rango continuo beta en [0.5, 3]
+
+```{r fbeta_barrido, fig.width=11, fig.height=6}
+# Usa muestras_p/r_lista, MODELOS, LABELS, COLORES y resumen_op — todos del Paso 6
+betas_rango <- seq(0.5, 3, by = 0.1)
+
+dt_barrido <- rbindlist(lapply(betas_rango, function(b) {
+  rbindlist(lapply(MODELOS, function(mod) {
+    fb <- f_beta(muestras_p_lista[[mod]], muestras_r_lista[[mod]], b)
+    data.table(beta = b, modelo = mod, mediana = median(fb),
+               lo = quantile(fb, 0.025), hi = quantile(fb, 0.975))
+  }))
+}))
+
+dt_barrido[, modelo := factor(modelo, levels = resumen_op$Modelo)]
+
+ggplot(dt_barrido, aes(x = beta, y = mediana, color = modelo, fill = modelo)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.10, color = NA) +
+  geom_line(linewidth = 1.1) +
+  geom_vline(xintercept = 1, linetype = "dashed",
+             color = "gray40", linewidth = 0.8) +
+  annotate("text", x = 1.05, y = 0.55, label = "beta=1\n(F1)",
+           hjust = 0, size = 3.5, color = "gray40") +
+  annotate("rect", xmin = 0.5, xmax = 1, ymin = -Inf, ymax = Inf,
+           alpha = 0.06, fill = "orange") +
+  annotate("text", x = 0.75, y = 0.58, label = "precision\n> recall",
+           hjust = 0.5, size = 3, color = "darkorange3") +
+  annotate("rect", xmin = 1, xmax = 3, ymin = -Inf, ymax = Inf,
+           alpha = 0.04, fill = "steelblue") +
+  annotate("text", x = 2, y = 0.58, label = "recall\n> precision",
+           hjust = 0.5, size = 3, color = "steelblue4") +
+  scale_color_manual(values = COLORES, labels = setNames(LABELS, MODELOS)) +
+  scale_fill_manual(values  = COLORES, labels = setNames(LABELS, MODELOS)) +
+  scale_x_continuous(breaks = seq(0.5, 3, by = 0.5)) +
+  labs(
+    title    = "Sensibilidad al supuesto de costos — Mediana F-beta por modelo",
+    subtitle = "Barrido continuo beta en [0.5, 3] — ventana operativa meses 16-18 — bandas = HPDI 95%",
+    x = "Beta (peso del recall vs precision)",
+    y = "Mediana F-beta posterior",
+    color = "Modelo", fill = "Modelo"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom",
+        legend.title = element_text(face = "bold"))
+```
+
+```{r ranking_barrido, include=FALSE}
+ganador_por_beta  <- dt_barrido[, .(ganador = modelo[which.max(mediana)]), by = beta]
+ganador_siempre   <- unique(ganador_por_beta$ganador)
+ultimo_por_beta   <- dt_barrido[, .(ultimo  = modelo[which.min(mediana)]),  by = beta]
+m3_siempre_ultimo <- all(ultimo_por_beta$ultimo == "M3_gbm_completo")
+```
+
+**Conclusion del barrido F-beta:** Tanto en la tabla de puntos discretos como en el rango beta = [0.5, 3] el modelo ganador es siempre **`r ganador_siempre`** y M3 es `r ifelse(m3_siempre_ultimo, "siempre el ultimo", "no siempre el ultimo")`. Sin embargo, como se declaro en 2.1, este analisis usa un threshold fijo. La seccion siguiente resuelve esa limitacion.
+
+### 2.4 Riesgo financiero con threshold optimo por modelo
+
+En lugar de pesos abstractos sobre la formula de F1, este enfoque asigna un **costo monetario real** a cada tipo de error y busca, para cada modelo, el threshold que **minimiza el riesgo financiero esperado** — no el que maximiza F1.
+
+**Costos asumidos** (declarados, no provistos por el banco):
+
+```{r costos_setup}
+FP_COST <- 30000        # costo de bloquear una transaccion legitima (friccion, atencion al cliente)
+FN_COST <- 1750000      # costo de un fraude no detectado (perdida economica directa)
+
+cat(sprintf("FN_COST / FP_COST = %.1fx\n", FN_COST / FP_COST))
+```
+
+Un falso negativo cuesta **`r round(FN_COST/FP_COST,0)` veces** mas que un falso positivo. Esta razon de costos es la que la consigna pide declarar explicitamente cuando se discuten costos asimetricos.
+
+**Fuente de datos:** probabilidades crudas (`predict_proba`) de cada modelo sobre los 24 meses disponibles (T0 validacion + T1 etiquetada), generadas a partir de los `.pkl` originales. Para mantener consistencia con el resto del Paso 6 y 7, el analisis se filtra a la **misma ventana operativa (meses 16-18)** usada en todo el documento. A diferencia de los conteos agregados reconstruidos desde `metricas_temporales.csv` con el threshold fijo de cada modelo, aqui se recorre **cada threshold posible** y se recalculan TP/FP/FN desde cero, operacion por operacion.
+
+```{r riesgo_financiero}
+# Cargar probabilidades crudas por operacion (generadas con predict_proba)
+df_proba <- fread("data/raw/df_val_all_models_predictions_proba.csv")
+
+# Filtrar a la ventana operativa — misma ventana usada en todo el Paso 6 y 7
+df_proba_op <- df_proba[mes >= 16 & mes <= 18]
+
+prediction_cols <- grep("_predictions$", names(df_proba_op), value = TRUE)
+y_true <- as.integer(df_proba_op$es_fraude)
+
+# Thresholds finos cerca de 0 (donde se concentra el optimo dado el costo del FN)
+thresholds <- sort(unique(c(seq(0, 0.05, by = 0.001), seq(0.05, 1, by = 0.01))))
+
+resultados_riesgo <- rbindlist(lapply(prediction_cols, function(col) {
+  y_score <- df_proba_op[[col]]
+
+  rbindlist(lapply(thresholds, function(th) {
+    y_pred <- as.integer(y_score >= th)
+
+    tp <- sum(y_pred == 1 & y_true == 1)
+    fp <- sum(y_pred == 1 & y_true == 0)
+    fn <- sum(y_pred == 0 & y_true == 1)
+
+    precision <- ifelse((tp + fp) > 0, tp / (tp + fp), 0)
+    recall    <- ifelse((tp + fn) > 0, tp / (tp + fn), 0)
+    f1        <- ifelse((precision + recall) > 0,
+                         2 * precision * recall / (precision + recall), 0)
+
+    riesgo <- fp * FP_COST + fn * FN_COST
+
+    data.table(
+      modelo = col, threshold = th,
+      tp = tp, fp = fp, fn = fn,
+      precision = precision, recall = recall, f1 = f1,
+      riesgo = riesgo
+    )
+  }))
+}))
+
+cat("Filas en ventana operativa:", nrow(df_proba_op), "\n")
+cat("Filas generadas en barrido:", nrow(resultados_riesgo), "\n")
+```
+
+```{r threshold_optimo}
+# Para cada modelo, el threshold que MINIMIZA el riesgo financiero
+threshold_optimo <- resultados_riesgo[, .SD[which.min(riesgo)], by = modelo]
+threshold_optimo <- threshold_optimo[order(riesgo)]
+
+threshold_optimo[, .(
+  modelo, threshold, precision = round(precision, 3),
+  recall = round(recall, 3), f1 = round(f1, 3),
+  riesgo = format(riesgo, big.mark = ".", scientific = FALSE)
+)] |>
+  kable(
+    caption   = "Threshold que minimiza el riesgo financiero — ventana operativa (meses 16-18)",
+    col.names = c("Modelo", "Threshold optimo", "Precision", "Recall", "F1", "Riesgo ($)")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(1, bold = TRUE, background = "#e8f4e8")
+```
+
+```{r comparacion_threshold, include=FALSE}
+# Comparar riesgo con threshold ORIGINAL (el que maximiza F1) vs threshold OPTIMO (el que minimiza riesgo)
+thresholds_originales <- c(M1=0.14, M2=0.11, M3=0.46, M4=0.11, M5=0.11)
+
+riesgo_original <- rbindlist(lapply(names(thresholds_originales), function(m) {
+  col <- paste0(m, "_predictions")
+  th  <- thresholds_originales[m]
+  y_score <- df_proba_op[[col]]
+  y_pred  <- as.integer(y_score >= th)
+  fp <- sum(y_pred == 1 & y_true == 0)
+  fn <- sum(y_pred == 0 & y_true == 1)
+  data.table(modelo = m, threshold_original = th,
+             riesgo_original = fp * FP_COST + fn * FN_COST)
+}))
+
+threshold_optimo[, modelo_corto := sub("_predictions", "", modelo)]
+comparacion <- merge(riesgo_original, threshold_optimo,
+                     by.x = "modelo", by.y = "modelo_corto")
+comparacion[, ahorro_pct := round(100 * (riesgo_original - riesgo) / riesgo_original, 1)]
+comparacion <- comparacion[order(riesgo)]
+
+m4_ahorro   <- comparacion[modelo == "M4", ahorro_pct]
+m4_th_orig  <- comparacion[modelo == "M4", threshold_original]
+m4_th_opt   <- comparacion[modelo == "M4", threshold]
+m4_riesgo_orig <- comparacion[modelo == "M4", riesgo_original]
+m4_riesgo_opt  <- comparacion[modelo == "M4", riesgo]
+ganador_riesgo <- comparacion$modelo[1]
+```
+
+```{r tabla_comparacion}
+tabla_comp <- comparacion[, .(
+  Modelo             = modelo,
+  `Th original`      = threshold_original,
+  `Riesgo original`  = format(riesgo_original, big.mark = ",", scientific = FALSE),
+  `Th optimo`        = threshold,
+  `Riesgo optimo`    = format(riesgo, big.mark = ",", scientific = FALSE),
+  `Ahorro pct`       = ahorro_pct
+)]
+
+tabla_comp |>
+  kable(caption = "Riesgo con threshold original vs threshold optimo") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  row_spec(which(tabla_comp$Modelo == "M4"), bold = TRUE, background = "#e8f4e8")
+```
+
+```{r figura_riesgo, fig.width=11, fig.height=6}
+resultados_riesgo[, modelo_corto := sub("_predictions", "", modelo)]
+
+ggplot(resultados_riesgo, aes(x = threshold, y = riesgo, color = modelo_corto)) +
+  geom_line(linewidth = 1.0) +
+  geom_point(data = threshold_optimo, aes(x = threshold, y = riesgo, color = modelo_corto),
+             size = 3, shape = 21, fill = "white", stroke = 1.2) +
+  coord_cartesian(xlim = c(0, 0.3)) +
+  scale_y_continuous(labels = function(x) format(x, big.mark = ".", scientific = FALSE)) +
+  labs(
+    title    = "Riesgo financiero esperado por threshold — ventana operativa (meses 16-18)",
+    subtitle = paste0("FP_COST=$", format(FP_COST, big.mark="."),
+                       "  ·  FN_COST=$", format(FN_COST, big.mark="."),
+                       "  ·  punto = threshold optimo por modelo"),
+    x = "Threshold", y = "Riesgo financiero ($)", color = "Modelo"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+```
+
+**Lectura de los resultados reales:**
+
+Con esta razon de costos (FN ≈ 58 veces mas caro que FP), el threshold optimo de **`r ganador_riesgo`** es **`r threshold_optimo[1, threshold]`** — muy por debajo del threshold original de **`r m4_th_orig`** que fue calibrado para maximizar F1. Al bajar el threshold de M4 de `r m4_th_orig` a `r m4_th_opt`, el riesgo financiero esperado en la ventana operativa cae de **\$`r format(m4_riesgo_orig, big.mark=".", scientific=FALSE)`** a **\$`r format(m4_riesgo_opt, big.mark=".", scientific=FALSE)`** — una reduccion del **`r m4_ahorro`%**.
+
+> **Por que esto resuelve la limitacion de 2.1:** en lugar de mantener fijo el threshold que maximiza F1 y simplemente cambiar el peso en la formula de F-beta, aqui se recalcula explicitamente el punto operativo (threshold) que corresponde a la razon de costos real.
+
+### 2.5 Conclusion de la seccion 2
+
+Los dos enfoques de sensibilidad a costos asimetricos —F-beta con threshold fijo (2.1-2.3) y riesgo financiero con threshold optimo (2.4)— **coinciden en el ranking de modelos**: **`r ganador_riesgo`** es el modelo con menor riesgo financiero esperado tanto con su threshold original como con el threshold optimo, y M3 permanece el peor en ambos enfoques. El segundo enfoque es metodologicamente mas riguroso porque no asume un threshold fijo, sino que lo recalcula segun el costo real de cada error — y ademas cuantifica una recomendacion operativa concreta: **recalibrar el threshold de M4 de `r m4_th_orig` a `r m4_th_opt` reduciria el riesgo financiero esperado en `r m4_ahorro`%** bajo el supuesto de costos declarado.
+
+
+
+------------------------------------------------------------------------
+
+## 3 Recomendacion al APFLA en tres horizontes (a desarrollar)
+
+```{r datos_rec, include=FALSE}
+# Todas estas variables ya existen del Paso 6 — solo las nombramos para claridad
+# ganador, resumen_op, mat — disponibles desde los chunks anteriores
+prob_m4_m3  <- round(mat["M4_gbm_moderado", "M3_gbm_completo"], 3)
+prob_m4_m2  <- round(mat["M4_gbm_moderado", "M2_random_forest"], 3)
+med_m4      <- resumen_op[Modelo == "M4_gbm_moderado", Mediana_F1]
+hpdi_lo_m4  <- resumen_op[Modelo == "M4_gbm_moderado", HPDI_lo]
+hpdi_hi_m4  <- resumen_op[Modelo == "M4_gbm_moderado", HPDI_hi]
+med_m3_op   <- resumen_op[Modelo == "M3_gbm_completo",  Mediana_F1]
+```
+
+### 3.1 Horizonte inmediato — julio 2025
+
+**Accion:** reemplazar M3 por **M4 (GBM Moderado)** en produccion.
+
+**Recalibrar el threshold de M4.** El analisis de riesgo financiero (seccion 2.4) muestra que, bajo el supuesto de costos declarado (FN ≈ 58x mas caro que FP), el threshold optimo de M4 es **`r m4_th_opt`**, muy por debajo del threshold original **`r m4_th_orig`** calibrado para maximizar F1. Pasar a ese threshold reduce el riesgo financiero esperado en la ventana operativa de \$`r format(m4_riesgo_orig, big.mark=".", scientific=FALSE)` a \$`r format(m4_riesgo_opt, big.mark=".", scientific=FALSE)` — una reduccion del **`r m4_ahorro`%**. Esta recalibracion deberia validarse con el APFLA antes de implementarse, ya que implica un aumento sustancial en la cantidad de alertas disparadas (mayor friccion operativa con clientes legitimos).
+
+### 3.2 Horizonte corto plazo — agosto a octubre 2025
+
+**Reentrenar M3** excluyendo `terminal_risk_score`, o recalibrarlo con el nuevo patron de terminales limpias comprometidas.
+
+#### Alerta: señal de deterioro generalizado en meses 22-24
+
+Los datos de los meses 22-24 (fase T2) revelan una señal critica:
+
+```{r analisis_t2, fig.width=11, fig.height=5}
+# Usa df_temp que ya existe del Paso 6 — no recarga el CSV
+meses_clave <- df_temp[mes %in% c(16:24)]
+meses_clave[, tp  := round(recall * n_fraude)]
+meses_clave[, fn  := n_fraude - tp]
+meses_clave[, fp  := ifelse(precision > 0, round((tp / precision) - tp), 0L)]
+meses_clave[, f1p := round(2 * tp / (2 * tp + fp + fn), 3)]
+
+tabla_t2 <- dcast(meses_clave[, .(modelo, mes, f1p)], modelo ~ mes,
+                  value.var = "f1p")
+setnames(tabla_t2, as.character(16:24),
+         c("M16","M17","M18","M19","M20","M21","M22","M23","M24"))
+
+tabla_t2 |>
+  kable(
+    caption   = "F1 puntual por modelo — meses 16 a 24",
+    col.names = c("Modelo","16","17","18","19","20","21","22*","23*","24*")
+  ) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) |>
+  add_header_above(c(" " = 1, "Ventana operativa" = 3,
+                     "T1 extendido" = 3, "T2 — alerta (*)" = 3)) |>
+  column_spec(8:10, background = "#fff3cd") |>
+  footnote(general = "(*) Meses 22-24: expansion fuera del analisis principal.")
+```
+
+```{r t2_caida, include=FALSE}
+f1_m21   <- meses_clave[mes == 21, .(modelo, f1_21 = f1p)]
+f1_m24   <- meses_clave[mes == 24, .(modelo, f1_24 = f1p)]
+caida_t2 <- merge(f1_m21, f1_m24, by = "modelo")
+caida_t2[, caida := round(f1_21 - f1_24, 3)]
+caida_max <- caida_t2[which.max(caida)]
+```
+
+**Señal de alerta en T2:** a partir del mes 22 **todos los modelos** colapsan — no solo M3. El modelo con mayor caida es **`r caida_max$modelo`** con una perdida de `r caida_max$caida` puntos entre el mes 21 y el 24. Esto sugiere una **segunda perturbacion del regimen** que compromete features de comportamiento transaccional (canal, dispositivo, secuencia) — las mismas que habian protegido a M1/M2/M4/M5 durante T1. **M4 podria ser vulnerable** si la campana evoluciona.
+
+### 3.3 Horizonte mediano plazo — 2026
+
+ver...
