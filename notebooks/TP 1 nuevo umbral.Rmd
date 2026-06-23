@@ -241,6 +241,129 @@ for(i in seq_len(n_models)) {
 
 round(dominance_f1, 3)
 ```
+Calc posterior for risk
+
+```{r}
+posterior_df <- metricas_temporales %>%
+  rowwise() %>%
+  mutate(
+
+    precision_samples = list(
+      rbeta(
+        10000,
+        1 + TP,
+        1 + FP
+      )
+    ),
+
+    recall_samples = list(
+      rbeta(
+        10000,
+        1 + TP,
+        1 + FN
+      )
+    ),
+
+    risk_samples = list({
+
+      p <- precision_samples
+      r <- recall_samples
+
+      # ожидаемое число FN
+      fn_hat <- TP * (1 / r - 1)
+
+      # ожидаемое число FP
+      fp_hat <- TP * (1 / p - 1)
+
+      fp_hat * cost_fp +
+        fn_hat * cost_fn
+    }),
+
+    precision_median = median(precision_samples),
+
+    recall_median = median(recall_samples),
+
+    risk_median = median(risk_samples),
+
+    hpdi = list(
+      hpdi(
+        risk_samples,
+        prob = 0.95
+      )
+    ),
+
+    risk_hpdi_lower = hpdi['lower'],
+    risk_hpdi_upper = hpdi['upper']
+
+  ) %>%
+  ungroup() %>%
+  select(
+    modelo,
+    mes,
+    TP,
+    TN,
+    FP,
+    FN,
+    precision_median,
+    recall_median,
+    risk_median,
+    risk_hpdi_lower,
+    risk_hpdi_upper
+  )
+print(posterior_df)
+```
+
+
+```{r}
+ggplot(
+  posterior_df,
+  aes(
+    x = mes,
+    y = risk_median,
+    color = modelo,
+    fill = modelo
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = risk_hpdi_lower,
+      ymax = risk_hpdi_upper
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  geom_line(
+    linewidth = 1
+  ) +
+  geom_point(
+    size = 1.5
+  ) +
+  geom_vline(
+    xintercept = c(13, 16),
+    linetype = "dashed",
+    linewidth = 0.8
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(posterior_df$mes),
+      max(posterior_df$mes),
+      by = 1
+    )
+  ) +
+  labs(
+    title = "Posterior Risk por mes",
+    x = "Month",
+    y = "Posterior median Risk",
+    color = "Modelo",
+    fill = "Modelo"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom"
+  )
+```
+
+
 Monetary matrix
 ```{r}
 cost_fp <- 30000
