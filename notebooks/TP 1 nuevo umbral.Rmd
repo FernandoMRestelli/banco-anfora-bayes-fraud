@@ -428,7 +428,7 @@ metricas_temporales_subset = metricas_temporales %>% filter(mes >= 13 & mes <= 1
 
 Domination matrix
 ```{r}
-model_summary <- metricas_temporales_subset %>%
+model_summary <- metricas_temporales %>% filter(mes <= 12) %>%
   group_by(modelo) %>%
   summarise(
     TP = sum(TP),
